@@ -1,0 +1,307 @@
+{
+  "models": [
+    "qwen3.8-flash",
+    "qwen3.7-flash",
+    "qwen-turbo"
+  ],
+  "runs_per_model": 3,
+  "summary": {
+    "qwen3.8-flash": {
+      "runs": 3,
+      "successes": 3,
+      "success_rate": 1.0,
+      "avg_latency_seconds": 11.416,
+      "p95_latency_seconds": 13.208,
+      "avg_coverage_count": 6
+    },
+    "qwen3.7-flash": {
+      "runs": 3,
+      "successes": 3,
+      "success_rate": 1.0,
+      "avg_latency_seconds": 6.228,
+      "p95_latency_seconds": 6.848,
+      "avg_coverage_count": 4.33
+    },
+    "qwen-turbo": {
+      "runs": 3,
+      "successes": 2,
+      "success_rate": 0.667,
+      "avg_latency_seconds": 9.062,
+      "p95_latency_seconds": 9.193,
+      "avg_coverage_count": 2
+    }
+  },
+  "results": [
+    {
+      "model": "qwen3.8-flash",
+      "ok": true,
+      "latency_seconds": 10.889,
+      "coverage": {
+        "muscle": true,
+        "fat": true,
+        "metabolism": true,
+        "water": true,
+        "protein": true,
+        "control_amount": true
+      },
+      "coverage_count": 6,
+      "has_interventions": true,
+      "text_length": 453,
+      "response": {
+        "overall_assessment": "您的体重（62.3kg）和BMI（21.1）处于正常范围，但身体成分存在明显的“肌肉不足、脂肪偏高”失衡现象。具体表现为骨骼肌量（26.4kg）、蛋白质（8.9kg）及全身水分均低于标准下限，而体脂率（22.9%）和皮下脂肪率（20.7%）高于标准上限。这种低肌肉伴随高脂肪的状态导致基础代谢偏低，建议首要干预方向为增加肌肉量并适度减少脂肪，以优化身体成分结构。",
+        "interventions": [
+          {
+            "category": "exercise",
+            "content": "鉴于肌肉控制量为+7.3kg，需重点进行抗阻力训练以刺激肌肉生长。建议每周安排3-4次力量训练，涵盖深蹲、硬拉、卧推等复合动作，逐步增加负荷。同时配合中等强度的有氧运动辅助减脂，避免过度有氧导致肌肉流失。"
+          },
+          {
+            "category": "nutrition",
+            "content": "针对蛋白质不足和肌肉合成需求，建议适当提高优质蛋白摄入比例，如瘦肉、鱼虾、蛋奶及豆制品，确保每日蛋白质摄入量满足增肌需求。控制总热量在推荐值附近，减少精制碳水和高脂食物摄入，以支持脂肪控制量-4.5kg的目标。"
+          },
+          {
+            "category": "lifestyle",
+            "content": "保证充足睡眠以促进肌肉修复和激素平衡，注意日常饮水以改善细胞内液偏低的情况。保持规律作息，避免久坐，有助于提升整体代谢水平。"
+          }
+        ]
+      },
+      "run": 1
+    },
+    {
+      "model": "qwen3.8-flash",
+      "ok": true,
+      "latency_seconds": 10.15,
+      "coverage": {
+        "muscle": true,
+        "fat": true,
+        "metabolism": true,
+        "water": true,
+        "protein": true,
+        "control_amount": true
+      },
+      "coverage_count": 6,
+      "has_interventions": true,
+      "text_length": 409,
+      "response": {
+        "overall_assessment": "当前体重处于标准范围内，但身体成分存在明显失衡。主要问题在于肌肉量不足（骨骼肌、蛋白质及水分均低于标准下限），同时体脂率偏高（超出标准上限）。虽然BMI正常，但属于“隐性肥胖”或肌肉流失型体质。首要干预方向为增加肌肉量并适度减少脂肪，以改善身体代谢和形态。",
+        "interventions": [
+          {
+            "category": "exercise",
+            "content": "建议每周进行3-4次抗阻力训练（如深蹲、俯卧撑、哑铃划船等复合动作）以刺激肌肉生长；配合每周2-3次中等强度有氧运动（如快走、慢跑）帮助控制体脂。注意循序渐进，避免过度疲劳。"
+          },
+          {
+            "category": "nutrition",
+            "content": "适当增加优质蛋白质摄入（如鸡胸肉、鱼虾、蛋类、豆制品），确保每日蛋白质摄入量满足肌肉合成需求；保持充足饮水以支持细胞代谢；控制精制碳水和高糖食物摄入，有助于降低体脂率。"
+          },
+          {
+            "category": "weight",
+            "content": "目标体重控制在65.1kg左右，需增加约2.8kg体重。重点在于通过增肌实现体重上升，而非单纯增加脂肪。"
+          },
+          {
+            "category": "lifestyle",
+            "content": "保证每晚7-8小时高质量睡眠，促进肌肉修复与激素平衡；减少久坐时间，每小时起身活动5分钟，维持基础代谢水平。"
+          }
+        ]
+      },
+      "run": 2
+    },
+    {
+      "model": "qwen3.8-flash",
+      "ok": true,
+      "latency_seconds": 13.208,
+      "coverage": {
+        "muscle": true,
+        "fat": true,
+        "metabolism": true,
+        "water": true,
+        "protein": true,
+        "control_amount": true
+      },
+      "coverage_count": 6,
+      "has_interventions": true,
+      "text_length": 599,
+      "response": {
+        "overall_assessment": "您的身体成分显示肌肉量不足与体脂偏高并存，属于典型的“隐性肥胖”或肌少性肥胖倾向。虽然体重和BMI在正常范围内，但骨骼肌质量、蛋白质含量及细胞内水分均低于标准下限，而体脂率（22.9%）和皮下脂肪率（20.7%）高于标准上限。这种失衡导致基础代谢处于临界低值，进而影响体型紧致度与健康状态。首要干预方向为“增肌减脂”，即通过力量训练提升肌肉量以改善代谢，同时适度控制热量摄入以降低体脂，而非单纯追求体重下降。",
+        "interventions": [
+          {
+            "category": "exercise",
+            "content": "建议每周进行3-4次中等强度的抗阻训练（如深蹲、俯卧撑、哑铃划船等），重点刺激大肌群以提升骨骼肌质量；配合每周150分钟的中等强度有氧运动（如快走、慢跑）辅助减少多余脂肪。避免过度依赖长时间低强度有氧，以免加剧肌肉流失。"
+          },
+          {
+            "category": "nutrition",
+            "content": "增加优质蛋白质摄入，每日每公斤体重建议摄入1.2-1.5克蛋白质（约75-95克/天），来源包括瘦肉、鱼虾、蛋类、豆制品及低脂奶制品，以支持肌肉合成并补充体内蛋白质缺口。保持充足的水分摄入，特别是运动前后，有助于改善细胞内水分偏低的情况。"
+          },
+          {
+            "category": "weight",
+            "content": "目标体重控制在65.1kg左右，需增加肌肉量约7.3kg，减少脂肪量约4.5kg。请勿急于求成，建议每月体重变化不超过1-2kg，重点关注体脂率下降和肌肉量上升的趋势，而非仅看体重秤数字。"
+          },
+          {
+            "category": "lifestyle",
+            "content": "保证每晚7-8小时的高质量睡眠，促进生长激素分泌以利于肌肉修复与脂肪分解。管理日常压力，避免皮质醇长期升高导致的腹部脂肪堆积和肌肉分解。"
+          }
+        ]
+      },
+      "run": 3
+    },
+    {
+      "model": "qwen3.7-flash",
+      "ok": true,
+      "latency_seconds": 5.321,
+      "coverage": {
+        "muscle": true,
+        "fat": true,
+        "metabolism": true,
+        "water": false,
+        "protein": true,
+        "control_amount": false
+      },
+      "coverage_count": 4,
+      "has_interventions": true,
+      "text_length": 340,
+      "response": {
+        "overall_assessment": "您的体重和BMI处于理想区间，但身体成分存在明显的‘肌肉不足’与‘脂肪相对偏高’的失衡状态。具体表现为骨骼肌、蛋白质及矿物质均低于标准下限，导致基础代谢率虽在正常范围但偏低，且皮下脂肪率超标。这种‘瘦胖子’（Skinny Fat）体型意味着虽然体重正常，但肌肉量不足以支撑良好的代谢健康和体态。首要干预方向是增加肌肉质量，而非单纯减重。",
+        "interventions": [
+          {
+            "category": "exercise",
+            "content": "重点进行抗阻力训练（力量训练），每周至少3次，针对大肌群（腿、背、胸）进行复合动作练习，以刺激骨骼肌生长。"
+          },
+          {
+            "category": "nutrition",
+            "content": "提高蛋白质摄入比例，确保每餐都有优质蛋白来源（如鸡蛋、瘦肉、豆制品），以支持肌肉合成；同时保持热量盈余或平衡，避免过度节食。"
+          },
+          {
+            "category": "weight",
+            "content": "目标不是减重，而是身体重组。建议维持当前体重或轻微增加，重点关注肌肉量的提升，脂肪量需通过运动消耗逐步降低。"
+          }
+        ]
+      },
+      "run": 1
+    },
+    {
+      "model": "qwen3.7-flash",
+      "ok": true,
+      "latency_seconds": 6.516,
+      "coverage": {
+        "muscle": true,
+        "fat": true,
+        "metabolism": true,
+        "water": false,
+        "protein": true,
+        "control_amount": true
+      },
+      "coverage_count": 5,
+      "has_interventions": true,
+      "text_length": 418,
+      "response": {
+        "overall_assessment": "您的身体成分整体呈现‘肌肉不足伴随脂肪偏高’的状态。尽管体重和BMI处于正常范围，但骨骼肌量、蛋白质及矿物质均低于标准下限，导致基础代谢率偏低，身体机能储备不足。同时，体脂率和皮下脂肪率超标，且腰臀比略高于理想区间，提示存在中心性脂肪堆积风险。当前首要干预方向是增加骨骼肌质量以提升代谢水平，并同步减少体内多余脂肪，改善身体成分比例。",
+        "interventions": [
+          {
+            "category": "exercise",
+            "content": "重点进行抗阻力训练（如深蹲、硬拉、卧推等复合动作），每周3-4次，每次45-60分钟，旨在刺激骨骼肌生长。结合中等强度有氧运动（如快走、慢跑）辅助脂肪消耗，注意循序渐进，避免过度疲劳。"
+          },
+          {
+            "category": "nutrition",
+            "content": "增加优质蛋白质摄入（如瘦肉、鱼、蛋、豆制品），确保每餐均有蛋白来源，以支持肌肉合成。控制精制碳水化合物和高糖食物的摄入，选择低升糖指数的主食。保持充足饮水，促进新陈代谢。"
+          },
+          {
+            "category": "weight",
+            "content": "建议通过增加肌肉量和减少脂肪量的方式调整身体成分。目标为增加约7.3kg的肌肉质量，同时减少约4.5kg的脂肪质量，最终实现更健康的身体结构。"
+          }
+        ]
+      },
+      "run": 2
+    },
+    {
+      "model": "qwen3.7-flash",
+      "ok": true,
+      "latency_seconds": 6.848,
+      "coverage": {
+        "muscle": true,
+        "fat": true,
+        "metabolism": true,
+        "water": false,
+        "protein": true,
+        "control_amount": false
+      },
+      "coverage_count": 4,
+      "has_interventions": true,
+      "text_length": 427,
+      "response": {
+        "overall_assessment": "您的身体成分总体处于‘肌肉不足伴随轻微脂肪堆积’的状态。虽然体重和BMI在正常范围内，但核心问题在于骨骼肌量显著低于标准下限，导致基础代谢能力偏弱，且体脂率及皮下脂肪比例超标。这种‘瘦胖子’（Skinny Fat）类型的体态意味着肌肉流失或发育不足，使得多余的热量容易转化为脂肪储存。首要干预方向是增加骨骼肌质量，通过力量训练提升肌肉量，同时配合适度热量控制以减少多余脂肪，从而改善身体紧致度和代谢健康。",
+        "interventions": [
+          {
+            "category": "exercise",
+            "content": "建议以抗阻力训练（力量训练）为主，重点针对大肌群（胸、背、腿）进行复合动作练习，如深蹲、硬拉、卧推等，每周至少3次，每次45-60分钟，旨在刺激肌肉生长。"
+          },
+          {
+            "category": "nutrition",
+            "content": "增加优质蛋白质摄入，建议每日摄入量达到每公斤体重1.2-1.5克（约75-90克），分散在三餐中，以支持肌肉合成。同时保持总热量摄入略低于消耗，避免高糖高脂食物，以辅助减少脂肪储备。"
+          },
+          {
+            "category": "lifestyle",
+            "content": "保证充足的睡眠（7-8小时/天），促进肌肉修复与生长激素分泌。避免久坐，日常增加非运动性活动消耗（如步行）。"
+          }
+        ]
+      },
+      "run": 3
+    },
+    {
+      "model": "qwen-turbo",
+      "ok": false,
+      "latency_seconds": 15.201,
+      "error": "ReportAnalyzerError",
+      "run": 1
+    },
+    {
+      "model": "qwen-turbo",
+      "ok": true,
+      "latency_seconds": 9.193,
+      "coverage": {
+        "muscle": true,
+        "fat": false,
+        "metabolism": false,
+        "water": true,
+        "protein": true,
+        "control_amount": false
+      },
+      "coverage_count": 3,
+      "has_interventions": true,
+      "text_length": 72,
+      "response": {
+        "overall_assessment": "您的身体成分总体处于健康范围，但肌肉质量略低于标准。建议关注肌肉量的维持和提升，同时保持水分、蛋白质和矿物质的平衡。",
+        "interventions": [
+          {
+            "category": "lifestyle",
+            "content": "保持现有饮食与运动习惯即可"
+          }
+        ]
+      },
+      "run": 2
+    },
+    {
+      "model": "qwen-turbo",
+      "ok": true,
+      "latency_seconds": 8.932,
+      "coverage": {
+        "muscle": true,
+        "fat": false,
+        "metabolism": false,
+        "water": false,
+        "protein": false,
+        "control_amount": false
+      },
+      "coverage_count": 1,
+      "has_interventions": true,
+      "text_length": 74,
+      "response": {
+        "overall_assessment": "您的身体成分总体处于健康范围，但肌肉质量略低于标准区间。建议适当增加力量训练以提升肌肉量，同时维持当前的饮食和生活方式。",
+        "interventions": [
+          {
+            "category": "lifestyle",
+            "content": "保持现有饮食与运动习惯即可"
+          }
+        ]
+      },
+      "run": 3
+    }
+  ]
+}
