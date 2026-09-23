@@ -1,12 +1,26 @@
 import asyncio
 import runpy
+from decimal import (
+    Clamped,
+    Context,
+    Decimal,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    Rounded,
+    Underflow,
+    localcontext,
+)
 from pathlib import Path
 
 import pytest
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from weight_agent.api.schemas.report import (
     Intervention,
+    ReferenceMetric,
     ReportAnalysis,
     ReportRequest,
 )
@@ -565,6 +579,7 @@ def test_benchmark_sample_matches_current_request_schema() -> None:
         '{"assessment":{"bmi":%s}}',
         '{"assessment":{"bmi":{"value":%s}}}',
         '{"assessment":{"bmi":{"standard_min":%s}}}',
+        '{"assessment":{"bmi":{"standard_max":%s}}}',
         '{"assessment":{"body_type":{"code":%s}}}',
         '{"unknown":{"nested":[%s]}}',
     ],
@@ -733,15 +748,17 @@ def test_zero_intake_is_not_a_daily_target(intake, use_model):
     assert "肌肉控制量 +7.3kg" in result["interventions"][0]["content"]
 
 
-def test_regular_validation_error_keeps_fastapi_detail_contract():
+@pytest.mark.parametrize("field", [None, "value", "standard_min", "standard_max"])
+def test_regular_validation_error_keeps_fastapi_detail_contract(field):
     app = create_app(Settings(_env_file=None, environment="test", dashscope_api_key=None))
+    metric = "invalid" if field is None else {field: "invalid"}
     with TestClient(app) as client:
-        response = client.post("/api/v1/report", json={"assessment": {"bmi": "invalid"}})
+        response = client.post("/api/v1/report", json={"assessment": {"bmi": metric}})
     assert response.status_code == 422
     assert response.json()["detail"] == [
         {
             "type": "decimal_parsing",
-            "loc": ["body", "assessment", "bmi", "value"],
+            "loc": ["body", "assessment", "bmi", field or "value"],
             "msg": "Input should be a valid decimal",
             "input": "invalid",
         }
@@ -758,3 +775,259 @@ def test_segment_ratio_rating_is_not_applied_to_mass():
         }
     )
     assert "改善重点" not in build_fallback_analysis(request).interventions[-1].content
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"measurement_id":"\\ud800"}',
+        b'{"measurement_id":"\\udfff"}',
+        b'{"unknown":{"\\ud800":[{"nested":"\\udfff"},NaN,Infinity,-Infinity]}}',
+        b'{"\\ud800":{"nested":["\\udfff"]}}',
+        b'{"assessment":{"bmi":{"value":"\\ud800"}}}',
+    ],
+)
+def test_invalid_unicode_json_returns_serializable_422(body):
+    app = create_app(Settings(_env_file=None, environment="test", dashscope_api_key=None))
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/report", content=body, headers={"Content-Type": "application/json"}
+        )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"][0]["loc"][0] == "body"
+    assert response.headers["X-Response-Time-Ms"]
+    response.content.decode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "body", [bytes([255]), b"\x80\xfe", b"\x00\xff", b"invalid", "中文".encode()]
+)
+def test_octet_stream_body_returns_serializable_422(body):
+    app = create_app(Settings(_env_file=None, environment="test", dashscope_api_key=None))
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/report", content=body, headers={"Content-Type": "application/octet-stream"}
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"][0]
+    assert detail["type"] == "model_attributes_type"
+    assert detail["loc"] == ["body"]
+    assert detail["input"] == body.decode("utf-8", errors="backslashreplace")
+
+
+def test_validation_error_sanitizes_nested_keys_values_and_context():
+    app = create_app(Settings(_env_file=None, environment="test", dashscope_api_key=None))
+
+    @app.post("/invalid-details")
+    async def invalid_details():
+        raise RequestValidationError(
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("body", "\ud800"),
+                    "msg": "invalid \udfff",
+                    "input": {
+                        "\ud800": [{b"\xff": b"\xfe"}, float("nan")],
+                        "中文": [1.25, None, True, "\U00020000"],
+                    },
+                    "ctx": {
+                        "\udfff": ("尾\ud800", b"\xfe", float("inf"), float("-inf")),
+                        "valid_bytes": "中文".encode(),
+                        "error": ValueError("invalid"),
+                    },
+                }
+            ]
+        )
+
+    with TestClient(app) as client:
+        response = client.post("/invalid-details")
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": [
+            {
+                "type": "value_error",
+                "loc": ["body", "\\ud800"],
+                "msg": "invalid \\udfff",
+                "input": {
+                    "\\ud800": [{"\\xff": "\\xfe"}, "nan"],
+                    "中文": [1.25, None, True, "\U00020000"],
+                },
+                "ctx": {
+                    "\\udfff": ["尾\\ud800", "\\xfe", "inf", "-inf"],
+                    "valid_bytes": "中文",
+                    "error": {},
+                },
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize("field", ["value", "standard_min", "standard_max"])
+@pytest.mark.parametrize(
+    "number",
+    [
+        "1e-2147483648",
+        "1234567890123e-2147483648",
+        "1e2147483648",
+        "1234567890123",
+        "1e12",
+        "1e-13",
+        "1.234567890123",
+        "0.1234567890123",
+    ],
+)
+def test_metric_numbers_reject_unsafe_digits_and_exponents(field, number):
+    app = create_app(Settings(_env_file=None, environment="test", dashscope_api_key=None))
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/report", json={"assessment": {"muscle_control_kg": {field: number}}}
+        )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == [
+        {
+            "type": "decimal_max_digits",
+            "loc": ["body", "assessment", "muscle_control_kg", field],
+            "msg": "Decimal input should have no more than 12 digits in total",
+            "input": number,
+            "ctx": {"max_digits": 12},
+        }
+    ]
+
+
+@pytest.fixture(params=["low_precision", "wide_precision", "trapped_small_exponent"])
+def decimal_context(request):
+    if request.param == "low_precision":
+        return Context(prec=2)
+    if request.param == "wide_precision":
+        return Context(prec=50)
+    return Context(
+        prec=2,
+        Emin=-2,
+        Emax=2,
+        traps=[Clamped, Inexact, InvalidOperation, Overflow, Rounded, Underflow],
+    )
+
+
+@pytest.mark.parametrize("field", ["value", "standard_min", "standard_max"])
+@pytest.mark.parametrize(
+    "number, canonical",
+    [
+        ("1e11", "1E+11"),
+        ("1e-12", "1E-12"),
+        ("123456789012", "123456789012"),
+        ("1.23456789012", "1.23456789012"),
+        ("12.34000000000000", "12.34"),
+        ("100000000000.00000", "1E+11"),
+        ("0.0000000000010000", "1E-12"),
+        ("123e-2", "1.23"),
+        ("-4.5000", "-4.5"),
+        ("-0.0000", "0"),
+        ("0e-2147483648", "0"),
+        ("-0e2147483648", "0"),
+        pytest.param("1." + "0" * 1000, "1", id="long_insignificant_zeros"),
+        pytest.param("0." + "0" * 1000, "0", id="long_zero"),
+    ],
+)
+def test_metric_numbers_canonicalize_without_decimal_context(
+    field, number, canonical, decimal_context
+):
+    with localcontext(decimal_context) as active_context:
+        for raw in (number, Decimal(number)):
+            metric = ReferenceMetric.model_validate({field: raw})
+            value = getattr(metric, field)
+            assert value.as_tuple() == Decimal(canonical).as_tuple()
+            assert len(format(value, "f")) <= 15
+            assert metric.model_dump(mode="json")[field] == canonical
+        assert not any(active_context.flags.values())
+
+
+@pytest.mark.parametrize("field", ["value", "standard_min", "standard_max"])
+def test_metric_number_limits_do_not_depend_on_decimal_context(field, decimal_context):
+    with localcontext(decimal_context) as active_context:
+        for number in (
+            "1234567890123",
+            "1.234567890123",
+            "1e-2147483648",
+            "1234567890123e-2147483648",
+            "1e2147483648",
+        ):
+            for raw in (number, Decimal(number)):
+                with pytest.raises(ValidationError) as exc:
+                    ReferenceMetric.model_validate({field: raw})
+                assert exc.value.errors()[0]["type"] == "decimal_max_digits"
+        assert not any(active_context.flags.values())
+
+
+@pytest.mark.parametrize(
+    "number", ["1.230000000000000", "0e-2147483648", "-0e2147483648", "1e-12", "1e11"]
+)
+def test_canonical_decimal_metrics_remain_safe_for_report_generation(number):
+    app = create_app(Settings(_env_file=None, environment="test", dashscope_api_key=None))
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/report",
+            json={
+                "assessment": {
+                    "muscle_control_kg": {
+                        "value": number,
+                        "standard_min": number,
+                        "standard_max": number,
+                    }
+                }
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert len(response.json()["interventions"]) == 6
+
+
+@pytest.mark.parametrize(
+    "name", ["device_extra", "foo_control_kg", "weight_control_kg", "中文.测量-50kHz"]
+)
+@pytest.mark.parametrize(
+    "metric",
+    [-1, {"value": -1}, {"standard_min": -1}, {"standard_max": -1}, {"value": 1, "unit": "kg"}],
+)
+def test_impedance_extensions_enforce_nonnegative_values_and_units(name, metric):
+    app = create_app(Settings(_env_file=None, environment="test", dashscope_api_key=None))
+    with TestClient(app) as client:
+        response = client.post("/api/v1/report", json={"bioelectrical_impedance": {name: metric}})
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"][0]["loc"][:2] == ["body", "bioelectrical_impedance"]
+
+
+@pytest.mark.parametrize(
+    "name", ["device_extra", "foo_control_kg", "weight_control_kg", "height_cm", "中文.测量-50kHz"]
+)
+@pytest.mark.parametrize("unit", [None, "", "ohm", "Ω"])
+def test_impedance_extensions_preserve_names_and_valid_units(name, unit):
+    payload = {
+        "bioelectrical_impedance": {
+            name: {"value": 0, "standard_min": 0, "standard_max": 0, "unit": unit}
+        }
+    }
+    request = ReportRequest.model_validate(payload)
+    metric = request.bioelectrical_impedance.model_extra[name]
+    assert metric.value == metric.standard_min == metric.standard_max == 0
+    assert metric.unit == unit
+    assert name in request.model_dump()["bioelectrical_impedance"]
+    app = create_app(Settings(_env_file=None, environment="test", dashscope_api_key=None))
+    with TestClient(app) as client:
+        response = client.post("/api/v1/report", json=payload)
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize("metric", [None, {}, 0, 123, "1.2300"])
+def test_impedance_extensions_keep_scalar_and_missing_inputs(metric):
+    request = ReportRequest.model_validate({"bioelectrical_impedance": {"中文.测量-50kHz": metric}})
+    assert request.bioelectrical_impedance.model_extra["中文.测量-50kHz"].value == (
+        None if metric is None or metric == {} else Decimal(str(metric))
+    )
+
+
+@pytest.mark.parametrize("name", ["weight_control_kg", "muscle_control_kg", "fat_control_kg"])
+def test_declared_control_metrics_keep_negative_values_and_bounds(name):
+    request = ReportRequest.model_validate(
+        {"assessment": {name: {"value": -2, "standard_min": -3, "standard_max": -1}}}
+    )
+    metric = getattr(request.assessment, name)
+    assert (metric.value, metric.standard_min, metric.standard_max) == (-2, -3, -1)

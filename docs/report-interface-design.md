@@ -92,15 +92,19 @@ X-User-Id: user-123
 
 当前 Schema 兼容旧版裸数值，例如 `"muscle_control_kg": 7.3`，但新接入建议使用完整指标对象。
 
-数值及标准上下限必须有限，十进制总位数最多 12 位（技术边界，不是医学阈值）；
-同时提供区间两端时，下限不得大于上限。控制量允许负值，其他已知测量指标及其区间非负，
+数值及标准上下限必须有限，十进制总位数最多 12 位（技术边界，不是医学阈值）。
+按十进制系数及指数检查边界，不依赖 Decimal context 的舍入或下溢；忽略无意义尾零并规范零，
+仍支持合法科学计数法，例如 `"1e-12"`、`"1.2300"`；`"1e-2147483648"` 等超界非零值返回 `422`，不会悄悄变成零。
+同时提供区间两端时，下限不得大于上限。三个评价控制量允许负值，其他测量指标及其区间非负，
 身高、体重、理想体重和目标体重的值须大于零。布尔值不作为数值或评级接受。
 单位可缺省；提供时必须匹配指标，例如体重量为 `kg`、BMI 为 `kg/m2` 或 `kg/m²`、
 热量为 `kCal`/`kcal`（支持 `/day`）、运动热量为 `kCal/30min`/`kcal/30min`。
+阻抗扩展指标同样要求非负，单位只允许缺省、空字符串、`ohm` 或 `Ω`；扩展键名不改变这些约束，中文、点号、连字符等合法名称继续支持。
 不限制肥胖度和节段肌肉率必须小于等于百分之百，也不为骨骼肌质量指数强加固定单位。
 身体类型编码和节段评级只接受对应范围内的整数，身体类型名称最多 100 字符。
 身体类型同时提供 `code` 和 `name` 时必须与下表协议映射一致，否则返回 `422`；仍支持只提供编码、只提供名称或全部缺省，不自动补全。
-非法输入中的裸 `NaN`、`Infinity` 等非有限数返回 `422`，错误详情内的非有限数转为文本，避免错误响应序列化失败；正常 `422` 结构保持不变。
+非法输入中的裸 `NaN`、`Infinity` 等非有限数、孤立 Unicode 代理字符、非 JSON 二进制请求返回 `422`。
+错误详情递归处理键和值：非有限数转文本，非法字符或字节以转义文本显示，避免错误响应自身变成 `500`；正常 `422` 结构保持不变。
 
 ## 3. 完整请求示例
 
@@ -518,11 +522,25 @@ X-User-Id: user-123
 - `interventions` 来自模型。
 - `key_evidence` 来自后端。
 
-模型内部使用 `{{body_composition.weight_kg}}` 一类指标对象路径引用数值，后端仅从本次请求中
-已有的 `value` 和 `unit` 回填，外部接口仍返回普通文本；支持运动字段和扩展阻抗字段名中的数字。
-正文中的直接数字、常见中文数值表达、不存在或缺少数值的引用、推荐摄入量零值的引用及重复分类会触发兜底；最多接受六个互不重复的分类。
-紧邻引用的已知指标名与路径明显不一致时（如“体重 {{assessment.bmi}}”）也会触发兜底。
-此检查保证数值引用可追溯，仅对明确标签做一致性检查，不是完整的自然语言语义或医学质量校验。
+当前提示词为 `report-v7`，沿用结构化引用：`overall_assessment` 和每条干预的 `content` 均为
+`{"text":"完整的定性说明。","references":["m0"]}`。对外响应仍为普通字符串，
+自定义 `ReportAnalyzer` 的 `ReportAnalysis` 契约也不变。
+提示词要求有身体实测值时生成复测条件和跟踪重点，无需历史报告，不编造复测周期；
+仅有部分指标时仍可生成复测建议。提示词以反例禁止中文数值复述（如“身体得分为六十六分”）。
+模型漏类时继续由后端补齐，兜底规则不变。
+
+每个可引用指标在模型输入中携带本次请求的 `reference_id` 和后端生成的 `reference_label`。
+数值以精确十进制字符串发送，不经浮点转换。模型仅选择编号，不提供或修改引用的名称、部位、数值、符号和单位。
+后端在独立的“参考测量”句中生成完整名称及原始数值、单位；交换引用顺序不会交换指标名称与数值。
+扩展阻抗键名中的中文、连字符、点号均原样保留，不再作为路径语法解析。
+
+缺少 `value` 的指标和零推荐摄入量不分配引用编号。未知编号、重复编号、旧式占位符、直接数字、
+常见中文数值（含中文小数、成数、训练次数）会使对应文本块校验失败：整体分析失败时整份走规则兜底，
+单条建议失败时仅丢弃该条、按缺类由后端补齐，其余模型建议保留；重复分类仍触发整份兜底。
+最多接受六个互不重复的分类。
+回填后的文本仍受整体分析 800 字符、单条建议 500 字符限制。
+定性说明中的正常并列指标及同义名称不再与后续数值做相邻词匹配，不会因此误触发兜底。
+这些约束保证引用的名值绑定，不代表能够验证全部自然语言表达、异常结论或医学质量。
 
 ### 6.2 模型不可用、失败或超时
 
@@ -538,7 +556,8 @@ X-User-Id: user-123
 身体年龄比较予以保留，但不会仅凭身体年龄较小推断整体健康或建议保持现状。
 
 模型正常但未返回某一分类时，只对该分类使用规则兜底，其余分类仍保留模型结果。
-模型整体不可用、失败或超时时，六个分类全部使用规则兜底；缺少对应参考数据的分类会返回
+单条建议因数字、符号、引用或长度校验失败被丢弃时，同样只对该分类补齐规则内容，`generation_mode` 仍为 `model`。
+模型整体不可用、整体分析失败、结构校验失败或超时时，六个分类全部使用规则兜底；缺少对应参考数据的分类会返回
 “暂无足够相关参考数据”的说明。
 
 ## 7. 错误处理
@@ -557,10 +576,11 @@ X-User-Id: user-123
 DASHSCOPE_API_KEY=sk-...
 WEIGHT_AGENT_REPORT_MODEL=qwen3.8-flash
 WEIGHT_AGENT_REPORT_MODEL_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-WEIGHT_AGENT_REPORT_MODEL_TIMEOUT_SECONDS=45
-WEIGHT_AGENT_REPORT_MODEL_TEMPERATURE=0.2
-WEIGHT_AGENT_REPORT_MODEL_MAX_COMPLETION_TOKENS=1200
+WEIGHT_AGENT_REPORT_MODEL_TIMEOUT_SECONDS=20
+WEIGHT_AGENT_REPORT_MODEL_TEMPERATURE=0
+WEIGHT_AGENT_REPORT_MODEL_MAX_COMPLETION_TOKENS=800
 WEIGHT_AGENT_REPORT_MODEL_ENABLE_THINKING=false
+WEIGHT_AGENT_REPORT_MODEL_STRICT_OUTPUT_VALIDATION=false
 ```
 
 其中 `temperature`、最大输出 token 数和 thinking 开关均可直接调整，无需修改代码。
@@ -604,11 +624,58 @@ WEIGHT_AGENT_REPORT_MODEL_ENABLE_THINKING=false
 | `request_id` | 本次请求唯一标识 |
 | `generation_mode` | `model` 或 `fallback` |
 | `model` | 使用的模型名称；未配置时为空 |
-| `prompt_version` | 当前提示词版本，例如 `report-v3` |
+| `prompt_version` | 当前提示词版本，例如 `report-v7` |
 | `model_duration_ms` | 模型调用耗时 |
 | `total_duration_ms` | 从工作流开始到结果生成的总耗时 |
 | `fallback_reason` | 兜底原因；模型成功时为空，超时为 `timeout` |
 
-模型分析器还会记录模型调用成功或失败的耗时日志。日志不记录完整身体成分数据、用户身份、关键依据或分析正文。
+模型分析器还会记录模型调用成功或失败的耗时日志。失败日志提供受控原因和结构字段位置，例如：
+
+```text
+report_model_failed model=qwen3.7-flash prompt_version=report-v7 duration_ms=13548
+  error=_ModelOutputError stage=resolve_references reason=literal_number
+  field=overall_assessment.text validation_type=none finish_reason=stop status_code=200
+```
+
+单条建议校验失败不再整份兜底，而是丢弃该条并单独记录：
+
+```text
+report_intervention_dropped model=qwen3.7-flash prompt_version=report-v7
+  stage=resolve_references reason=literal_number field=interventions[2].content.text
+  validation_type=none
+```
+
+以上仅为格式示例，不代表已定位某次真实请求的失败原因。`interventions[2]` 是模型返回列表的第三项，
+不是后端补齐后固定顺序的第三类；`status_code` 是模型服务 HTTP 状态，不是报告生成是否成功。
+
+| 字段 | 说明 |
+| --- | --- |
+| `stage` | `build_payload`、`request`、`response_json`、`response_content`、`model_schema` 或 `resolve_references` |
+| `reason` | 固定失败原因码，见下表 |
+| `field` | 失败字段及列表下标；根节点为 `$`，未知字段名替换为 `<extra>` |
+| `validation_type` | Pydantic 错误类型，例如 `string_too_long`、`literal_error`；非 Schema 错误为 `none` |
+| `finish_reason` | 仅保留 `stop`、`length`、`content_filter`、`tool_calls`、`function_call`，缺失或未知为 `unknown` |
+| `status_code` | 模型服务响应状态；尚未取得响应为 `none` |
+
+| `reason` | 含义 |
+| --- | --- |
+| `literal_number` / `forbidden_symbol` | 正文命中现有数字规则 / 不允许的测量符号或占位符规则 |
+| `duplicate_reference` / `unknown_reference` | 引用重复 / 引用不存在或不可用；不记录引用内容 |
+| `invalid_text_encoding` | 正文无法编码为 UTF-8 |
+| `empty_content` / `invalid_content_type` | 模型正文为空 / 不是文本 |
+| `invalid_model_json` / `schema_validation` | 模型正文不是合法 JSON / 不符合输出 Schema |
+| `text_too_long` / `rendered_text_too_long` | 模型正文超长 / 追加参考测量后超长 |
+| `duplicate_category` | 干预分类重复 |
+| `invalid_response_json` / `invalid_response_structure` | 模型服务 HTTP 响应不是 JSON / 缺少所需响应结构 |
+| `http_error` / `http_request_error` / `timeout` | HTTP 错误状态 / 网络请求错误 / HTTP 客户端超时 |
+| `payload_error` / `analysis_error` | 请求体构造失败 / 其他分析链路错误 |
+
+同一诊断信息也通过日志记录的 `failure_stage`、`failure_reason`、`failure_field`、`validation_type`、
+`finish_reason`、`status_code` 属性提供；Schema 校验只记录首个错误的类型和位置。
+`finish_reason=length` 可帮助识别服务报告的长度限制，但不据此新增拒绝、重试或降级规则。
+工作流总超时仍由 `report_request_completed` 中的 `fallback_reason=timeout` 表示。
+
+这些诊断日志不记录异常原文、完整身体成分数据、用户身份、密钥、未知字段内容、关键依据或分析正文。
+模型输入、校验条件、输出篇幅不变；兜底策略除单条建议失败改为只丢弃该条外保持不变。
 
 当前日志用于性能监控和后续数据表设计，暂不持久化报告原文和完整请求数据。

@@ -14,7 +14,7 @@ router = APIRouter()
 async def chat_stream(
     request: Request,
     payload: ChatRequest,
-    x_user_id: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None, max_length=128),
 ) -> StreamingResponse:
     """处理流式 Chat 请求，以 SSE 形式持续返回工作流事件。"""
     # 未提供用户 ID 时按匿名用户处理
@@ -22,8 +22,10 @@ async def chat_stream(
     # 从应用状态取工作流实例；测试环境缺失时退回默认实例
     workflow = getattr(request.app.state, "chat_workflow", ChatWorkflow())
     events = workflow.run(payload, user_id=user_id)
+    settings = getattr(request.app.state, "settings", None)
+    include_metadata = bool(getattr(settings, "chat_expose_debug_events", False))
     return StreamingResponse(
-        encode_events(events),
+        encode_events(events, include_metadata=include_metadata),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",  # 禁用缓存保证实时性

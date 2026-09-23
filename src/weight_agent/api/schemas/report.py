@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     ConfigDict,
@@ -14,6 +15,10 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic_core import PydanticKnownError
+
+# 技术性位数上限，不代表医学阈值或设备的小数精度。
+_METRIC_MAX_DIGITS = 12
 
 
 def _reject_bool(value: Any) -> Any:
@@ -22,11 +27,31 @@ def _reject_bool(value: Any) -> Any:
     return value
 
 
-# 技术性位数上限，不代表医学阈值或设备的小数精度。
+def _validate_metric_number(value: Decimal) -> Decimal:
+    if value.is_zero():
+        return Decimal(0)
+    # normalize 会受 context 舍入或下溢影响；直接检查位数组，避免展开极端指数。
+    sign, digits, exponent = value.as_tuple()
+    end = len(digits)
+    while digits[end - 1] == 0:
+        end -= 1
+    exponent += len(digits) - end
+    digits = digits[:end]
+    if (
+        len(digits) > _METRIC_MAX_DIGITS
+        or exponent < -_METRIC_MAX_DIGITS
+        or len(digits) + exponent > _METRIC_MAX_DIGITS
+    ):
+        raise PydanticKnownError("decimal_max_digits", {"max_digits": _METRIC_MAX_DIGITS})
+    # 规范零及无意义尾零，让下游定点格式化的长度保持有界。
+    return Decimal((sign, digits, exponent))
+
+
 MetricNumber = Annotated[
     Decimal,
-    Field(allow_inf_nan=False, max_digits=12),
+    Field(allow_inf_nan=False),
     BeforeValidator(_reject_bool),
+    AfterValidator(_validate_metric_number),
 ]
 MetricLevel = Annotated[int | str, BeforeValidator(_reject_bool)]
 
@@ -71,6 +96,9 @@ def _validate_metric(
     metric: ReferenceMetric,
     field_name: str,
     units: tuple[str, ...] | None = None,
+    *,
+    allow_negative: bool = False,
+    require_positive: bool = False,
 ) -> ReferenceMetric:
     if units is None:
         if field_name.endswith("_kg"):
@@ -91,16 +119,12 @@ def _validate_metric(
             }.get(field_name)
     if units is not None and metric.unit not in (None, "", *units):
         raise ValueError(f"{field_name} has an incompatible unit")
-    if not field_name.endswith("_control_kg"):
+    if not allow_negative:
         for name in ("value", "standard_min", "standard_max"):
             value = getattr(metric, name)
             if value is not None and value < 0:
                 raise ValueError(f"{field_name}.{name} must be non-negative")
-    if (
-        field_name in {"height_cm", "weight_kg", "ideal_body_weight_kg", "target_weight_kg"}
-        and metric.value is not None
-        and metric.value <= 0
-    ):
+    if require_positive and metric.value is not None and metric.value <= 0:
         raise ValueError(f"{field_name}.value must be positive")
     return metric
 
@@ -154,7 +178,9 @@ class SubjectProfile(ReportSchema):
     @field_validator("height_cm", "age_years")
     @classmethod
     def validate_metrics(cls, metric: ReferenceMetric, info: ValidationInfo) -> ReferenceMetric:
-        return _validate_metric(metric, info.field_name)
+        return _validate_metric(
+            metric, info.field_name, require_positive=info.field_name == "height_cm"
+        )
 
 
 class BodyComposition(ReportSchema):
@@ -177,7 +203,9 @@ class BodyComposition(ReportSchema):
     @field_validator("*")
     @classmethod
     def validate_metrics(cls, metric: ReferenceMetric, info: ValidationInfo) -> ReferenceMetric:
-        return _validate_metric(metric, info.field_name)
+        return _validate_metric(
+            metric, info.field_name, require_positive=info.field_name == "weight_kg"
+        )
 
 
 class BioelectricalImpedance(ReportSchema):
@@ -197,6 +225,13 @@ class BioelectricalImpedance(ReportSchema):
     @classmethod
     def validate_metrics(cls, metric: ReferenceMetric, info: ValidationInfo) -> ReferenceMetric:
         return _validate_metric(metric, info.field_name, ("ohm", "Ω"))
+
+    @model_validator(mode="after")
+    def validate_extra_metrics(self) -> "BioelectricalImpedance":
+        # 扩展字段不经过 field_validator，且任意扩展键不能享有控制量特权。
+        for name, metric in (self.model_extra or {}).items():
+            _validate_metric(metric, name, ("ohm", "Ω"))
+        return self
 
 
 class SegmentValues(ReportSchema):
@@ -257,7 +292,13 @@ class Assessment(ReportSchema):
         cls, metric: ReferenceMetric | BodyTypeValue, info: ValidationInfo
     ) -> ReferenceMetric | BodyTypeValue:
         if isinstance(metric, ReferenceMetric):
-            return _validate_metric(metric, info.field_name)
+            return _validate_metric(
+                metric,
+                info.field_name,
+                allow_negative=info.field_name
+                in {"weight_control_kg", "muscle_control_kg", "fat_control_kg"},
+                require_positive=info.field_name in {"ideal_body_weight_kg", "target_weight_kg"},
+            )
         return metric
 
 

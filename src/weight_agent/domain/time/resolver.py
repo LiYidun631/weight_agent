@@ -10,6 +10,20 @@ from weight_agent.chat.models import ComparisonMode
 from weight_agent.domain.time.models import ResolvedTimeRange, TimeRange
 
 
+def load_timezone(name: str) -> ZoneInfo | timezone:
+    """加载 IANA 时区；常用默认时区在 tzdata 不可用时提供固定偏移兜底。"""
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError as exc:
+        fallback_offsets = {
+            "UTC": UTC,
+            "Asia/Shanghai": timezone(timedelta(hours=8), name="Asia/Shanghai"),
+        }
+        if name in fallback_offsets:
+            return fallback_offsets[name]
+        raise ValueError(f"unknown timezone: {name}") from exc
+
+
 class TimeRangeResolver:
     """解析常见中文时间表达，最终日期计算完全由确定性代码完成。"""
 
@@ -35,7 +49,7 @@ class TimeRangeResolver:
         default_days: int = 30,
     ) -> ResolvedTimeRange:
         """解析时间表达；无法可靠解析时返回澄清状态。"""
-        zone = self._load_timezone(timezone)
+        zone = load_timezone(timezone)
         current_now = self._coerce_now(now, zone)
         text = (expression or "").strip()
 
@@ -48,7 +62,15 @@ class TimeRangeResolver:
                 reason_codes=["default_recent_period"],
             )
 
-        parsed = self._parse_explicit_date_range(text, zone)
+        try:
+            parsed = self._parse_explicit_date_range(text, zone)
+        except ValueError:
+            return ResolvedTimeRange(
+                confidence=0.5,
+                needs_clarification=True,
+                clarification_question="起止日期的顺序似乎反了，请确认开始日期早于结束日期。",
+                reason_codes=["explicit_range_start_not_before_end"],
+            )
         if parsed:
             return self._with_comparison(parsed, comparison_mode, text, zone)
 
@@ -129,20 +151,6 @@ class TimeRangeResolver:
         if normalized in chinese_counts:
             return chinese_counts[normalized]
         return int(normalized)
-
-    @staticmethod
-    def _load_timezone(name: str) -> ZoneInfo | timezone:
-        """加载 IANA 时区；常用默认时区在 tzdata 不可用时提供固定偏移兜底。"""
-        try:
-            return ZoneInfo(name)
-        except ZoneInfoNotFoundError as exc:
-            fallback_offsets = {
-                "UTC": UTC,
-                "Asia/Shanghai": timezone(timedelta(hours=8), name="Asia/Shanghai"),
-            }
-            if name in fallback_offsets:
-                return fallback_offsets[name]
-            raise ValueError(f"unknown timezone: {name}") from exc
 
     @staticmethod
     def _rolling_range(

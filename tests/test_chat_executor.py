@@ -66,6 +66,7 @@ def test_executor_runs_data_based_advice_in_fixed_order() -> None:
             intent=ChatIntent.DATA_BASED_ADVICE,
             output_needs=[OutputNeed.DATA, OutputNeed.ADVICE],
             confidence=0.91,
+            entities={"metrics": ["weight"], "time_expression": "最近30天"},
         )
     )
 
@@ -74,6 +75,7 @@ def test_executor_runs_data_based_advice_in_fixed_order() -> None:
     assert result.route == "data_based_advice"
     assert result.data["executed_nodes"] == ["data_analysis", "business_advice"]
     assert len(result.node_results) == 2
+    assert result.status == "needs_data"
 
 
 def test_executor_accepts_metric_repository_injection() -> None:
@@ -92,7 +94,7 @@ def test_executor_accepts_metric_repository_injection() -> None:
     )
 
     assert result.node_results[0].data["repository_configured"] is True
-    assert result.node_results[0].data["execution_status"] == "not_implemented"
+    assert result.node_results[0].data["execution_status"] == "completed"
 
 
 def test_executor_runs_safety_and_scope_routes() -> None:

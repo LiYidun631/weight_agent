@@ -9,7 +9,19 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from weight_agent.chat.models import SupervisorPlan, SupervisorRoute
+from weight_agent.chat.advice import (
+    HealthAdviceAgent,
+    HealthAdviceRequest,
+    RuleFirstHealthAdviceAgent,
+)
+from weight_agent.chat.models import (
+    AdviceFacts,
+    AnalysisResult,
+    ConversationTurn,
+    SupervisorPlan,
+    SupervisorRoute,
+)
+from weight_agent.domain.metrics.analysis import MetricAnalysisService
 from weight_agent.domain.metrics.models import MetricQuery
 from weight_agent.domain.metrics.repository import MetricRepository
 from weight_agent.domain.time.resolver import TimeRangeResolver
@@ -23,7 +35,12 @@ class NodeContext(BaseModel):
     request_id: str = Field(min_length=1, max_length=128)
     conversation_id: str = Field(min_length=1, max_length=128)
     user_id: str = Field(min_length=1, max_length=128)
+    message: str = Field(default="", max_length=4000)
+    locale: str = Field(default="zh-CN", min_length=1, max_length=16)
     timezone: str = Field(default="Asia/Shanghai", min_length=1, max_length=64)
+    conversation_summary: str | None = Field(default=None, max_length=2000)
+    recent_turns: list[ConversationTurn] = Field(default_factory=list, max_length=10)
+    artifacts: dict[str, Any] = Field(default_factory=dict)
 
 
 class NodeResult(BaseModel):
@@ -33,7 +50,7 @@ class NodeResult(BaseModel):
 
     node_name: str = Field(min_length=1, max_length=64)
     route: SupervisorRoute
-    status: Literal["completed", "needs_clarification"] = "completed"
+    status: Literal["completed", "needs_clarification", "needs_data", "blocked"] = "completed"
     content: str = Field(min_length=1, max_length=8000)
     data: dict[str, Any] = Field(default_factory=dict)
 
@@ -70,7 +87,7 @@ class _RouteCheckedNode:
         plan: SupervisorPlan,
         content: str,
         data: Mapping[str, Any] | None = None,
-        status: Literal["completed", "needs_clarification"] = "completed",
+        status: Literal["completed", "needs_clarification", "needs_data", "blocked"] = "completed",
     ) -> NodeResult:
         return NodeResult(
             node_name=self.node_name,
@@ -127,7 +144,8 @@ class SafetyReplyNode(_RouteCheckedNode):
         message = plan.safety_message
         if not message:
             raise NodeRouteError("safety plan must contain safety_message")
-        return self._result(plan=plan, content=message)
+        # 安全回复不是正常完成，用 blocked 让客户端与后续轮次区分对待
+        return self._result(plan=plan, content=message, status="blocked")
 
 
 class ScopeReplyNode(_RouteCheckedNode):
@@ -157,10 +175,12 @@ class DataAnalysisNode(_RouteCheckedNode):
         self,
         repository: MetricRepository | None = None,
         time_resolver: TimeRangeResolver | None = None,
+        analysis_service: MetricAnalysisService | None = None,
     ) -> None:
         """注入指标仓库；数据库未接入时允许为空并返回占位结果。"""
         self._repository = repository
         self._time_resolver = time_resolver or TimeRangeResolver()
+        self._analysis_service = analysis_service or MetricAnalysisService()
 
     async def execute(self, plan: SupervisorPlan, context: NodeContext) -> NodeResult:
         self._check_route(plan)
@@ -208,37 +228,107 @@ class DataAnalysisNode(_RouteCheckedNode):
             end_at=resolved_time.current.end_at,
             timezone=context.timezone,
         )
+        observations = []
+        metric_result = None
+        analysis_results = []
+        if self._repository is not None:
+            metric_result = await self._repository.get_observations(query)
+            observations = metric_result.observations
+            analysis_results = self._analysis_service.analyze(
+                observations,
+                period=resolved_time,
+            )
         return self._result(
             plan=plan,
-            content="数据分析节点已接收执行计划，真实指标查询和分析将在下一阶段接入。",
+            content=(
+                "已完成指标查询和分析。"
+                if metric_result
+                else "已生成指标查询计划，数据仓库尚未配置。"
+            ),
             data={
-                "execution_status": "not_implemented",
+                "execution_status": "completed" if metric_result else "query_plan_only",
                 "requires_metric_query": plan.requires_metric_query,
                 "repository_configured": self._repository is not None,
                 "timezone": context.timezone,
                 "time_resolution": resolved_time.model_dump(mode="json"),
                 "metric_query": query.model_dump(mode="json"),
+                "metric_result": metric_result.model_dump(mode="json") if metric_result else None,
+                "analysis_results": [item.model_dump(mode="json") for item in analysis_results],
             },
         )
 
 
 class BusinessAdviceNode(_RouteCheckedNode):
-    """业务建议节点的占位实现。
-
-    ``domain_advice`` 后续直接接收领域知识上下文；``data_based_advice`` 后续接收
-    DataAnalysisNode 产出的 AnalysisResult/AdviceFacts。
-    """
+    """调用健康建议 Agent 的业务建议节点。"""
 
     node_name = "business_advice"
     supported_routes = frozenset({"domain_advice", "data_based_advice"})
 
+    def __init__(self, agent: HealthAdviceAgent | None = None) -> None:
+        self._agent = agent or RuleFirstHealthAdviceAgent()
+
     async def execute(self, plan: SupervisorPlan, context: NodeContext) -> NodeResult:
         self._check_route(plan)
+        analysis_results, invalid_analysis_count = self._parse_analysis_results(
+            context.artifacts.get("analysis_results", [])
+        )
+        advice_facts = self._parse_advice_facts(context.artifacts.get("advice_facts"))
+        message = context.message.strip() or "请给我一些体重管理建议"
+        response = await self._agent.advise(
+            HealthAdviceRequest(
+                message=message,
+                mode="data_based" if plan.route == "data_based_advice" else "domain",
+                categories=plan.intent_result.entities.advice_categories,
+                goal=plan.intent_result.entities.goal,
+                timezone=context.timezone,
+                locale=context.locale,
+                risk_level=plan.intent_result.risk_level,
+                conversation_summary=context.conversation_summary,
+                recent_turns=context.recent_turns,
+                analysis_results=analysis_results,
+                advice_facts=advice_facts,
+            )
+        )
         return self._result(
             plan=plan,
-            content="业务建议节点已接收执行计划，真实建议生成将在下一阶段接入。",
+            content=response.render_text(),
             data={
-                "execution_status": "not_implemented",
+                "execution_status": response.status,
                 "requires_analysis": plan.route == "data_based_advice",
+                "analysis_results": [
+                    item.model_dump(mode="json") for item in analysis_results
+                ],
+                "advice": response.model_dump(mode="json"),
+                "invalid_analysis_count": invalid_analysis_count,
             },
+            status=response.status,
         )
+
+    @staticmethod
+    def _parse_analysis_results(
+        raw_results: Any,
+    ) -> tuple[list[AnalysisResult], int]:
+        if not isinstance(raw_results, list):
+            return [], 1 if raw_results else 0
+        parsed: list[AnalysisResult] = []
+        invalid_count = 0
+        for item in raw_results:
+            if isinstance(item, AnalysisResult):
+                parsed.append(item)
+                continue
+            try:
+                parsed.append(AnalysisResult.model_validate(item))
+            except (TypeError, ValueError):
+                invalid_count += 1
+        return parsed, invalid_count
+
+    @staticmethod
+    def _parse_advice_facts(raw_facts: Any) -> AdviceFacts | None:
+        if raw_facts is None:
+            return None
+        if isinstance(raw_facts, AdviceFacts):
+            return raw_facts
+        try:
+            return AdviceFacts.model_validate(raw_facts)
+        except (TypeError, ValueError):
+            return None

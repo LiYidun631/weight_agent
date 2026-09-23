@@ -1,8 +1,8 @@
 # Chat 接口设计文档
 
 > 状态：设计中  
-> 当前版本：v1.2  
-> 最后更新：2026-09-21  
+> 当前版本：v1.33  
+> 最后更新：2026-09-23  
 > 适用范围：Weight Agent Chat V1
 
 ## 1. 文档用途
@@ -16,7 +16,9 @@
 - 服务基础配置：应用名、环境、监听地址、端口和 API 前缀。
 - Chat 配置：意图识别阈值、短期记忆 TTL、最大轮次和默认时区/语言。
 - Report 配置：报告模型名称、调用超时、温度、最大输出 token 数和 thinking 开关。
-- 模型服务配置：模型服务地址和 API 密钥。
+- 模型服务配置：模型服务地址、模型名称、调用超时、输出参数和 API 密钥。
+
+本项目不训练、不部署本地模型，也不在服务内维护本地推理权重。意图识别、健康建议、报告生成等需要模型能力的模块统一通过外部模型 API 调用，并通过协议适配器隔离具体供应商。规则、词表、业务模板、评估集和安全护栏属于应用代码，不等同于模型训练。
 
 规则关键词、意图枚举、路由契约和安全模板属于代码/领域策略，不作为环境变量拆散配置。数据库接入后，数据库连接信息单独增加 `DATABASE_*` 配置分组。
 
@@ -39,6 +41,7 @@ V1 不包含：
 - 允许模型自由生成或执行 SQL。
 - 多个自治 Agent 之间的开放式协作。
 - 长时间运行的离线报告生成。
+- 本地训练、本地微调、本地模型推理或模型权重管理。
 
 ## 3. 核心设计决策
 
@@ -119,7 +122,11 @@ V1 只提供流式端点。是否补充非流式 `/api/v1/chat`，在前端接�
 | `conversation_id` | string | 否 | UUID；缺省时服务端创建 |
 | `message` | string | 是 | 去除首尾空格后 1-4000 字符 |
 | `timezone` | string | 否 | IANA 时区；默认取用户资料，仍缺失则使用系统默认时区 |
-| `client_context.locale` | string | 否 | V1 默认 `zh-CN` |
+| `client_context.locale` | string | 否 | 客户端偏好语言/区域，例如 `zh-CN`、`en-US`；缺省使用服务默认值 |
+
+`client_context.locale` 表示客户端配置或用户偏好，不一定等同于本轮实际输入语言。服务端在语义解析阶段维护本轮的 `detected_language` 和 `response_language`：默认按用户本轮实际使用的主要语言回复；用户在消息中明确要求另一种语言时遵循该要求；语言检测置信度不足时回退到客户端 `locale`，最后回退到服务默认语言。客户端偏好不会覆盖用户本轮明确表达的语言要求。
+
+语言代码采用 BCP 47 风格标签，例如 `zh-CN`、`en-US`、`ja-JP`。内部语言检测也可先使用基础语言代码（如 `zh`、`en`、`ja`），需要决定地区格式时再结合客户端 `locale`。
 
 `user_id` 不允许由请求体传入，必须来自认证上下文，防止查询其他用户数据。
 
@@ -138,7 +145,8 @@ X-Accel-Buffering: no
 
 ## 6. SSE 事件协议
 
-所有事件的 `data` 都是单行 JSON。每个事件包含 `request_id`、`sequence` 和 `timestamp`，便于排序和排障。
+所有事件的 `data` 都是单行 JSON。调试模式事件包含 `request_id`、`sequence` 和
+`timestamp`，便于排序和排障；默认公共模式只返回客户端展示所需的最小字段。
 
 ### 6.1 事件类型
 
@@ -146,14 +154,32 @@ X-Accel-Buffering: no
 |---|---|---:|
 | `start` | 确认会话和请求已创建 | 否 |
 | `progress` | 展示当前处理阶段 | 是 |
-| `data` | 返回意图识别结果、查询范围和核心统计结果 | 是 |
-| `delta` | 返回自然语言文本增量 | 是 |
+| `data` | 返回意图识别结果、查询范围和核心统计结果；仅调试模式发送 | 是 |
+| `delta` | 按模型 token 或最小文本片段返回自然语言增量 | 是 |
 | `citation` | 返回资料来源；一期不发送，二期联网后启用 | 是 |
 | `warning` | 数据不足或健康风险提示 | 是 |
 | `error` | 流建立后的错误 | 否 |
 | `done` | 请求正常结束及最终元数据 | 否 |
 
 ### 6.2 示例
+
+默认公共模式：
+
+```text
+event: start
+data: {"conversation_id":"conv_123"}
+
+event: delta
+data: {"content":"最近"}
+
+event: delta
+data: {"content":" 30 天的数据如下……"}
+
+event: done
+data: {"status":"completed","conversation_id":"conv_123"}
+```
+
+调试模式（`WEIGHT_AGENT_CHAT_EXPOSE_DEBUG_EVENTS=true`）：
 
 ```text
 event: start
@@ -176,13 +202,19 @@ data: {"request_id":"req_123","sequence":5,"timestamp":"2026-09-20T12:00:03Z","s
 
 - `start` 必须是第一个事件。
 - 正常结束必须且只能发送一次 `done`。
-- `error` 是终止事件，发送后关闭连接，不再发送 `done`。
+- `error` 是终止事件，发送后关闭连接，不再发送 `done`。工作流主体异常统一在
+  事件边界转换为 `error`（错误码见第 13 节），客户端不会遇到连接裸断。
 - 服务端每 15 秒发送 SSE 注释心跳，防止代理关闭空闲连接。
 - 客户端断开后，服务端应取消当前图执行和下游 HTTP 请求。
+- 默认客户端模式只发送 `start`、多个 `delta`、一次 `done`，异常时以 `error`
+  结束；`error` 在公共模式下只保留 `code`、`message` 和 `retryable` 三个字段。
+  规则版按短句或约 12 个字符的适中片段逐步返回正文，避免逐字符刷新造成界面抖动。
 - `delta` 只包含面向用户的正文，不混入调试信息或思维过程。
-- 对结构化数据先发送 `data`，再发送依赖这些数据生成的 `delta`。
-- 意图识别完成后发送 `data(type=intent_result)`，便于前端和日志系统观测语义判断。
-- Supervisor 计划生成后发送 `data(type=supervisor_plan)`，便于观测固定路由、所需 Agent 和是否访问指标数据。
+- `data(type=intent_result)`、`data(type=supervisor_plan)` 和
+  `data(type=route_execution)` 只在 `WEIGHT_AGENT_CHAT_EXPOSE_DEBUG_EVENTS=true`
+  时发送，用于开发排查，不作为默认客户端协议。
+- 接入支持原生流式输出的 LLM 后，`delta` 应直接转发模型产生的 chunk；当前规则版
+  使用短句/小段文本模拟同一接口行为，不要求一个 SSE 事件只包含一个字符。
 
 ## 7. 意图识别设计
 
@@ -313,6 +345,487 @@ LLM 只允许返回 `IntentResult` 对应的 JSON Schema：
 - 使用支持结构化输出的模型接口；不支持时使用 JSON mode 后再做严格 Pydantic 校验。
 
 建议给分类器的输入只包含必要上下文：当前消息、最近一轮已确认的时间/指标上下文和可用指标枚举，不直接塞入完整数据库结果。
+
+### 7.6.1 意图识别深度设计：目标语义层
+
+当前 `IntentResult` 仍作为 Chat Supervisor 的稳定输入，不在一期直接废弃；但内部意图识别不应只输出一个扁平 `intent`。后续优化方向是新增“语义理解层”，先把自然语言解析为任务、主题、目标、槽位、约束、风险和数据依赖，再适配为现有 `IntentResult` 和路由。
+
+核心原则：
+
+- `ChatIntent` 是路由兼容层，不是完整语义层。
+- “用户想做什么”优先于“用户提到了什么词”。例如“我的体重一直下降，应该怎么增重”核心任务是建议，而不是数据分析。
+- 指标、趋势、时间、目标、建议类别要作为槽位或上下文事实保存，不能直接等同于意图。
+- 规则不再只给最终意图，而是提供可审计证据、候选和槽位；LLM 负责复杂语义、省略、多轮和口语化表达；最终由融合器统一裁决。
+
+目标流水线：
+
+```text
+原始消息
+  -> 文本归一化
+  -> 规则解析：安全信号、业务关键词、指标、时间、目标、数据依赖线索
+  -> LLM 语义解析：复杂语义、多轮补全、省略恢复、模糊表达
+  -> 候选融合：候选意图排序、槽位合并、冲突检测、置信度校准
+  -> 澄清决策：缺槽、候选接近、约束冲突、风险不确定
+  -> IntentResult 兼容适配
+  -> SupervisorPlan 路由
+```
+
+#### 7.6.1.1 分层意图体系
+
+不要继续扩展几十个扁平 `ChatIntent`。内部语义层采用 `domain + task + topic + goal + data_dependency` 的组合表达。
+
+```text
+domain
+  ├── general
+  ├── health_data
+  ├── health_knowledge
+  └── out_of_scope
+
+task
+  ├── greeting
+  ├── query
+  ├── analysis
+  ├── advice
+  ├── compare
+  ├── explain
+  ├── clarify
+  └── out_of_scope
+
+topic
+  ├── weight
+  ├── bmi
+  ├── body_fat
+  ├── waist
+  ├── diet
+  ├── exercise
+  ├── sleep
+  ├── lifestyle
+  └── general_health
+
+goal
+  ├── weight_loss
+  ├── weight_gain
+  ├── fat_loss
+  ├── muscle_gain
+  ├── maintain_weight
+  └── improve_lifestyle
+```
+
+`data_dependency` 用于判断是否必须查询用户数据：
+
+| 值 | 含义 | 示例 | 目标路由 |
+|---|---|---|---|
+| `none` | 不需要个人数据也能回答 | “减肥期间吃什么” | `domain_advice` |
+| `optional` | 用户提到个人情况，但没有数据也可以给通用建议 | “我的体重一直下降，应该怎么增重” | `domain_advice` |
+| `required` | 必须读取个人指标数据才能完成 | “根据最近一个月体重变化给我饮食建议” | `data_based_advice` |
+
+典型映射：
+
+| 用户表达 | 内部语义 | 兼容意图 | 路由 |
+|---|---|---|---|
+| “帮我查体重” | `task=query, topic=weight, data_dependency=required` | `metric_query` | `data_analysis` |
+| “帮我分析最近一个月体重变化” | `task=analysis, topic=weight, data_dependency=required` | `metric_analysis` | `data_analysis` |
+| “根据最近一个月体重变化给我饮食建议” | `task=advice, topic=[weight,diet], data_dependency=required` | `data_based_advice` | `data_based_advice` |
+| “减肥期间吃什么” | `task=advice, topic=diet, goal=weight_loss, data_dependency=none` | `domain_advice` | `domain_advice` |
+| “我的体重一直下降，应该怎么增重” | `task=advice, topic=weight, goal=weight_gain, data_dependency=optional` | `domain_advice` | `domain_advice` |
+
+#### 7.6.1.2 语义模型草案
+
+后续可以在 `chat/models.py` 中新增内部模型，先不直接暴露给 API：
+
+```python
+class TaskType(StrEnum):
+    GREETING = "greeting"
+    QUERY = "query"
+    ANALYSIS = "analysis"
+    ADVICE = "advice"
+    COMPARE = "compare"
+    EXPLAIN = "explain"
+    CLARIFY = "clarify"
+    OUT_OF_SCOPE = "out_of_scope"
+
+
+class TopicType(StrEnum):
+    WEIGHT = "weight"
+    BMI = "bmi"
+    BODY_FAT = "body_fat"
+    WAIST = "waist"
+    DIET = "diet"
+    EXERCISE = "exercise"
+    SLEEP = "sleep"
+    LIFESTYLE = "lifestyle"
+    GENERAL_HEALTH = "general_health"
+
+
+class DataDependency(StrEnum):
+    NONE = "none"
+    OPTIONAL = "optional"
+    REQUIRED = "required"
+
+
+class SlotSource(StrEnum):
+    USER = "user"
+    RULE = "rule"
+    LLM = "llm"
+    CONTEXT = "context"
+    DEFAULT = "default"
+
+
+class SlotValue(BaseModel):
+    name: str
+    value: str | list[str] | None
+    canonical_value: str | list[str] | None = None
+    source: SlotSource
+    confidence: float
+    confirmed: bool = False
+    required: bool = False
+    conflict: bool = False
+
+
+class IntentCandidate(BaseModel):
+    task: TaskType
+    intent: ChatIntent
+    topics: list[TopicType]
+    data_dependency: DataDependency
+    score: float
+    evidence: list[str]
+    missing_slots: list[str]
+
+
+class SemanticParse(BaseModel):
+    domain: ChatDomain
+    task: TaskType
+    topics: list[TopicType]
+    goals: list[str]
+    data_dependency: DataDependency
+    detected_language: str
+    response_language: str
+    slots: list[SlotValue]
+    candidates: list[IntentCandidate]
+    selected_candidate_index: int | None = None
+    confidence: float
+    risk_level: RiskLevel
+    needs_clarification: bool = False
+    clarification_question: str | None = None
+    reason_codes: list[str]
+```
+
+`SemanticParse` 是内部中间结果，最后再通过适配器转换为当前 `IntentResult`。这样可以保持现有 `ChatSupervisor`、`RouteExecutor` 和接口测试稳定。
+
+#### 7.6.1.3 槽位体系
+
+一期重点槽位：
+
+| 槽位 | 用途 | 是否必填取决于 |
+|---|---|---|
+| `metric` | 体重、BMI、体脂率、腰围等 | 查询/分析/数据型建议 |
+| `time_expression` | 最近一个月、最近三次、今天等 | 数据查询类任务 |
+| `comparison_mode` | 环比、目标对比、前后对比 | 对比/分析任务 |
+| `goal` | 减重、增重、减脂、维持等 | 建议类任务 |
+| `advice_category` | 饮食、运动、睡眠、生活方式 | 建议类任务 |
+| `risk_signal` | 急症、医疗风险、诊疗诉求 | 所有任务 |
+| `data_dependency` | 是否需要个人数据 | 路由决策 |
+| `timezone` | 时间归一化 | 时间表达解析 |
+| `client_locale` | 客户端声明的偏好语言/区域 | 语言检测低置信时的回退 |
+| `detected_language` | 本轮消息的主要语言 | 决定本轮回复语言 |
+| `response_language` | 经优先级规则确定的回复语言 | 意图澄清和最终答复 |
+
+语言决策优先级：
+
+```text
+用户本轮明确指定的回复语言
+  > 本轮消息检测出的主要语言
+  > client_context.locale
+  > 服务默认语言
+```
+
+用户本轮语言与客户端 locale 不同，且没有明确指定回复语言时，默认跟随本轮消息语言。例如客户端 locale 为 `zh-CN`，但用户本轮用英文提问，则用英文回答。用户明确要求“请用中文回答”时，则使用中文，即使输入主体是英文。
+
+语言检测作为轻量语义元数据处理：优先使用本地确定性检测或现有模型意图解析的附带字段，不单独增加一次模型 API 调用。混合语言消息按主要表达语言决定；主要语言无法可靠判断时回退到客户端 locale。后续如果实际 bad case 表明本地检测不足，可以在原有模型 API 请求中要求结构化返回语言字段，而不是新增独立翻译调用。
+
+答复模型应直接按 `response_language` 生成文本，包括澄清问题、范围说明、安全提示和健康建议。正常路径不增加“先生成一种语言、再调用翻译 API”的步骤，减少额外延迟、费用和翻译偏差。若未来确需翻译，应作为明确的可选能力单独评估。
+
+槽位合并规则：
+
+- 当前消息显式槽位优先级最高。
+- 用户纠正表达覆盖历史槽位，例如“不，我是想增重”覆盖上一轮 `weight_loss`。
+- 历史上下文只在当前消息省略时补齐，不得覆盖当前消息。
+- 规则和 LLM 对同一槽位冲突时，保留冲突标记并交给澄清决策。
+- 默认槽位必须标记 `source=default`，并在回复中说明，例如“如果你没有指定时间，我先按最近 30 天处理”。
+
+#### 7.6.1.4 上下文与多轮理解
+
+当前项目已经有 `recent_turns`、`confirmed_entities`、`pending_entities` 和 `last_intent`。后续 DST 应补充以下状态：
+
+```python
+class DialogueState(BaseModel):
+    active_task: TaskType | None = None
+    active_topics: list[TopicType] = []
+    active_goal: str | None = None
+    confirmed_slots: list[SlotValue] = []
+    pending_slots: list[SlotValue] = []
+    last_candidates: list[IntentCandidate] = []
+    last_route: SupervisorRoute | None = None
+    clarification_attempts: int = 0
+    last_user_correction: bool = False
+```
+
+多轮规则：
+
+- 用户新消息优先于历史状态。
+- 用户短回答如果命中上一轮 `pending_slots`，应视为澄清回答，而不是新任务。
+- 用户出现“不是、改成、我说的是、不对”等纠正信号时，清理冲突槽位并重新解析。
+- 话题继承只在用户省略主语/对象时发生，例如“最近三次”继承上一轮的指标和任务。
+- 连续澄清达到 2 次后，应给出可执行默认方案或范围说明，避免反复追问。
+
+必须覆盖的多轮样例：
+
+```text
+用户：帮我分析体重
+系统：你想分析最近 30 天还是最近几次？
+用户：最近三次
+=> 继承 topic=weight，补齐 time_expression=最近三次，路由 data_analysis
+```
+
+```text
+用户：我想减肥
+用户：不，我是想增重
+=> goal 从 weight_loss 修正为 weight_gain
+```
+
+```text
+用户：帮我查一下最近一个月体重
+用户：再给点饮食建议
+=> 继承 topic=weight 和时间范围，第二轮可走 data_based_advice 或 domain_advice，取决于是否明确要结合数据
+```
+
+#### 7.6.1.5 歧义、多候选与多意图
+
+一期支持有限多意图，不做任意任务编排。
+
+明确支持：
+
+```text
+查询/分析 + 建议
+```
+
+例如：
+
+```text
+帮我分析最近一个月体重变化，并告诉我怎么调整饮食
+```
+
+内部可以分解为：
+
+```text
+1. task=analysis, topic=weight, data_dependency=required
+2. task=advice, topic=diet, data_dependency=required
+```
+
+执行顺序固定为：
+
+```text
+data_analysis -> business_advice
+```
+
+候选排序优先级：
+
+```text
+安全风险 > 明确行动目标 > 数据依赖 > 查询/分析 > 泛化建议 > 问候
+```
+
+因此：
+
+```text
+“你好，帮我查一下最近一个月体重”
+```
+
+不能判为问候；而：
+
+```text
+“我的体重一直下降，应该怎么增重”
+```
+
+应优先识别为建议任务，`下降` 只是背景事实，不是分析任务的充分条件。
+
+#### 7.6.1.6 澄清回路
+
+澄清触发不应只依赖单个 `confidence`，而应综合：
+
+```text
+missing_required_slot
+or candidate_margin_too_small
+or slot_conflict
+or risk_uncertain
+or scope_uncertain
+```
+
+澄清类型：
+
+| 类型 | 用途 | 示例 |
+|---|---|---|
+| `slot_filling` | 补关键槽位 | “你想分析体重、BMI、体脂率还是腰围？” |
+| `selection` | 多候选选择 | “你是想查看数据，还是想分析变化趋势？” |
+| `confirmation` | 确认高风险或冲突理解 | “你是想了解一般建议，而不是医疗诊断，对吗？” |
+| `repair` | 处理纠正和恢复 | “好的，我按增重目标重新给你建议。” |
+| `scope` | 超范围说明 | “这个问题超出体重管理范围，我可以帮你看体重、饮食和运动相关问题。” |
+
+澄清策略：
+
+- 一次只问一个最关键问题。
+- 先问影响路由的问题，再问展示细节。
+- 简单领域建议尽量不澄清。
+- 查询/分析缺指标时必须澄清。
+- 分析缺时间时可以默认最近 30 天，但要在回复中说明。
+- `clarification_attempts >= 2` 时不再无限追问，给出默认方案或能力范围说明。
+
+#### 7.6.1.7 置信度与 OOS
+
+不要完全相信模型自报 `confidence`。最终置信度应由服务端融合生成：
+
+```text
+final_confidence =
+  rule_signal_score
+  + model_confidence
+  + slot_completeness
+  + candidate_margin
+  - conflict_penalty
+  - risk_uncertainty_penalty
+```
+
+一期可以先用确定性分档：
+
+| 档位 | 条件 |
+|---|---|
+| 高 | 规则或模型均有明确证据，关键槽位完整，无冲突 |
+| 中 | 模型高置信但规则证据弱，或存在可默认槽位 |
+| 低 | 多候选接近、关键槽缺失、槽位冲突或疑似超范围 |
+
+OOS 识别规则：
+
+- 明确非业务请求走 `out_of_scope`。
+- 健康业务信号和 OOS 信号同时存在时，优先处理业务部分。
+- 一句话包含业务和非业务需求时，标记 `mixed_scope`，处理业务部分，并简短说明非业务部分暂不支持。
+- 不要仅靠少量关键词判 OOS，低置信时优先澄清或给范围说明。
+
+#### 7.6.1.8 鲁棒性与一期边界
+
+一期支持多语言文本鲁棒性，不做语音、图像、多模态融合。
+
+需要支持：
+
+- 识别并记录用户本轮主要语言，同时保留客户端 locale 和最终回复语言字段。
+- 保留原始消息，并单独生成供规则匹配使用的归一化副本；归一化不得覆盖原文。
+- 统一全角/半角标点、重复标点和无意义首尾空白；不得无差别删除所有空格，避免破坏英文及其他依赖词间空格的语言。
+- 按 Unicode 规则处理空白、大小写和标点；语言特定的切词与归一化应可扩展，不用中文规则改写其他语言文本。
+- 常见口语表达，例如“咋办”“怎么整”“最近咋样”。
+- 常见错别字和 ASR 噪声的轻量纠错。
+- 中英文及其他语言混合表达，例如 `BMI`、`body fat`；规范化副本用于匹配，模型语义解析仍可接收原文。
+- 提示词注入忽略：用户消息和历史上下文都只作为业务输入，不能覆盖系统规则。
+
+本阶段语言支持目标是“理解用户输入语言并用同种语言回答”，不是先把所有输入翻译成某一种内部语言。需要通过意图识别评估集逐步补充各目标语言的样例、别名、口语表达和路由回归测试。
+
+暂不做：
+
+- 长期用户画像。
+- 强化学习策略。
+- POMDP。
+- 图数据库级知识图谱。
+- 多模态意图识别。
+- 本地训练、本地微调或本地推理模型；所有模型能力均通过 API 调用。
+
+#### 7.6.1.9 评估与迭代
+
+新增脱敏评估集，建议文件：
+
+```text
+tests/fixtures/intent_eval.jsonl
+```
+
+单条样例：
+
+```json
+{
+  "id": "advice_weight_gain_001",
+  "message": "我的体重一直下降，应该怎么增重呢",
+  "expected_task": "advice",
+  "expected_topics": ["weight"],
+  "expected_goal": "weight_gain",
+  "expected_data_dependency": "optional",
+  "expected_route": "domain_advice",
+  "needs_clarification": false,
+  "risk_level": "none"
+}
+```
+
+首批覆盖：
+
+- 查询数据。
+- 趋势分析。
+- 周期对比。
+- 查询/分析 + 建议。
+- 数据型建议。
+- 通用领域建议。
+- 增重、减重、减脂、维持目标。
+- 多轮短回答。
+- 用户纠正。
+- 模糊时间。
+- OOS。
+- 紧急风险。
+- 医疗谨慎。
+- 提示词注入。
+- 口语表达和错别字。
+
+评估指标：
+
+- task accuracy
+- route accuracy
+- slot exact match / slot F1
+- clarification precision / recall
+- risk recall
+- OOS precision / recall
+- structured output success rate
+- fallback rate
+- latency
+
+#### 7.6.1.10 分阶段实施计划
+
+阶段一：文档和模型
+
+- 固化本章节设计。
+- 新增内部枚举和 Pydantic 模型。
+- 保持 `IntentResult` 对外兼容。
+
+阶段二：语言感知与文本归一化
+
+- 新增语言决策字段和优先级实现：`client_locale`、`detected_language`、`response_language`。
+- 新增保留原文的文本归一化器；归一化文本只作为规则匹配副本。
+- 为中文、英文及后续目标语言分别建立归一化和检测测试。
+
+阶段三：语义解析器
+
+- 拆出规则解析器，输出证据、候选和槽位。
+- 复杂请求调用模型 API 时要求按 `response_language` 生成结构化语义结果；不增加单独翻译调用。
+
+阶段四：融合与澄清
+
+- 新增候选融合器。
+- 新增槽位冲突检测。
+- 新增澄清决策器。
+- 将结果适配回 `IntentResult`。
+
+阶段五：多轮 DST
+
+- 扩展 `ConversationMemory` 保存轻量 `DialogueState`。
+- 完善澄清回答解析、话题继承、用户纠正。
+- 部署时再将内存版本替换为 Redis 版本。
+
+阶段六：评估闭环
+
+- 新增 `intent_eval.jsonl`。
+- 新增批量评估脚本。
+- 将线上 bad case 脱敏后沉淀为回归用例。
+- 增加多语言 task/route/slot 准确率、语言跟随准确率和按语言分组的延迟评估。
 
 ### 7.7 置信度与澄清策略
 
@@ -521,9 +1034,13 @@ Chat 支持多轮对话，但一期只提供会话级短期记忆，不建立跨
 会话记忆通过 `conversation_id` 关联，并且必须同时校验 `user_id`，防止不同用户读取同一个会话：
 
 - 当前会话的用户消息和助手最终答复。
-- 已确认的指标、时间范围、时区、对比方式和建议目标。
-- 最近一次意图结果和未完成的澄清上下文。
+- 已确认的指标、时间范围、时区、对比方式和建议目标（`confirmed_entities`）。
+- 最近一次意图结果和未完成的澄清上下文（`last_intent` + `pending_entities`）。
 - 一份长度受限的会话摘要，用于较长会话的后续轮次。
+
+澄清轮次也写入记忆：用户消息和澄清问题作为轮次保存，未确认的槽位写入
+`pending_entities`。下一轮短回答（如“体重”“最近三个月”）由规则分类器合并进待定槽位；
+只有回答携带新的查询/分析/建议诉求时，才按新意图路由。
 
 不保存模型内部推理过程、无关客户端数据、未经必要性判断的完整数据库结果，或跨会话复用的敏感健康画像。
 
@@ -580,7 +1097,7 @@ class ConversationContext(BaseModel):
   -> SSE done 后保存最终轮次和已确认上下文 -> 更新 TTL
 ```
 
-只有请求正常完成或生成了明确的澄清/安全回复时才写入最终助手轮次。客户端中途断开时，不得把不完整的模型增量当作最终答复。
+只有请求正常完成或生成了明确的澄清/安全回复时才写入最终助手轮次。当前 `ChatWorkflow` 已接入 `ConversationMemory`：请求开始加载短期上下文，意图识别使用最近轮次和已确认实体，请求完成后保存用户消息、助手答复、最近意图和实体。客户端中途断开时，不得把不完整的模型增量当作最终答复。
 
 ### 存储实现
 
@@ -644,7 +1161,11 @@ business_advice -> compose_answer
 compose_answer -> validate_answer -> save_memory -> END
 ```
 
-当前 Workflow 已通过 `route_execution` SSE `data` 事件发布节点执行结果和执行顺序；数据分析、业务建议节点目前返回占位结果，待后续接入 Repository、分析服务和建议生成器。当前 Repository 仅作为依赖注入口，不会在占位节点中提前执行查询。
+当前 Workflow 已通过 `route_execution` SSE `data` 事件发布节点执行结果和执行顺序；注入 `MetricRepository` 后，数据分析节点会执行查询并调用确定性 `MetricAnalysisService` 生成 `AnalysisResult`。未注入仓库时仍只返回查询计划。`data_based_advice` 会把分析结果作为结构化事实传给业务建议节点。
+
+指标分析采用“通用统计内核 + 指标策略注册表”：几十个指标共享观测数、首末值、最大/最小值、平均值、变化量、变化率和趋势计算；需要不同最少样本数、稳定阈值或特殊派生逻辑的指标通过 `MetricAnalysisSpec`/扩展策略注册，不在主流程中堆叠指标名称分支。`AnalysisResult.metadata` 用于承载可扩展的指标特有事实。
+
+当前已建立 `MetricCatalog` 作为指标元数据入口，首批覆盖 `weight`、`bmi`、`body_fat_rate`、`waist_circumference`、`basal_metabolic_rate`、`muscle_mass` 和 `body_water_rate`。每个指标集中维护展示名、默认单位、最少样本数、稳定阈值及是否支持建议；后续增加指标时优先扩展目录和专属策略，不修改 Chat 主流程。
 
 `route_execution` 至少包含 `route`、`status`、`timezone`、`node_results` 和 `data`。数据型路由的 `data` 中包含时间解析结果与查询计划；最近 N 条请求使用 `latest_count/latest_query`，周期请求使用 `time_resolution/metric_query`。
 
@@ -819,6 +1340,41 @@ LLM 不得：
 - 推荐处方药、调整药量或替代医生意见。
 - 在没有检索来源时生成虚假引用。
 
+### 11.1 健康建议 Agent 的阶段性设计
+
+数据库表结构和数据适配器尚未确定，因此暂时暂停 `data_analysis` 的真实数据闭环，
+但保留数据分析 Agent 的输入输出契约，不删除后续接入点。健康建议 Agent 分为两个入口：
+
+1. **领域型建议（`domain_advice`）**：不读取个人历史数据，直接处理减脂饮食、
+   早餐搭配、运动、睡眠和生活方式等业务问题。这部分可以在当前阶段先实现。
+2. **数据型建议（`data_based_advice`）**：必须接收 `AnalysisResult` 或
+   `AdviceFacts` 后才能给出针对个人数据的建议。在数据库未接入、没有分析事实时，
+   不得生成推测性结论，应返回“缺少数据”的受控结果，建议增加独立的 `needs_data`
+   状态，避免与用户表达不清的 `needs_clarification` 混淆。
+
+健康建议 Agent 不直接查询数据库，也不负责计算指标。建议采用以下固定流水线：
+
+```text
+安全检查
+  -> 建议上下文构建
+  -> 确定性健康规则
+  -> LLM 组织表达（一期不联网）
+  -> 结构化结果校验
+```
+
+输入至少包括用户问题、建议类别、目标、时区、会话上下文，以及可选的
+`AnalysisResult`/`AdviceFacts`。输出应包含摘要、可执行建议、建议类别、依据事实、
+风险提示、缺失信息和规则版本。LLM 只能组织已经允许的建议素材，不能编造用户数据、
+诊断、药物方案或外部引用。
+
+第一阶段先实现 `domain_advice` 的规则版和供应商无关的结构化 LLM 适配协议；
+`data_based_advice` 保持路由和契约不变，暂时在缺少分析事实时安全降级。这样可以先验证
+健康建议 Agent 的输入输出、安全边界和多轮对话行为，而不提前绑定数据库结构。
+
+当前代码通过 `RuleFirstHealthAdviceAgent` 先生成规则基线；可选的
+`LlmHealthAdvicePolisher` 只能修改摘要、标题和措辞，建议数量、类别、依据、风险等级、
+警告和规则版本均由服务端保留并校验。模型调用失败或输出越权时回退到规则基线。
+
 ## 12. 联网能力与安全边界
 
 ### 12.1 一期不联网的决策
@@ -841,6 +1397,18 @@ LLM 不得：
 ### 12.3 安全升级
 
 当用户描述急症信号、自伤风险或明显需要诊疗的情况时，停止普通建议流程，返回安全模板，说明应联系当地急救服务或专业医疗人员。具体触发词和策略需要医学审核。
+
+规则分类器内置分层安全召回，作为 LLM 结果之上的强制护栏（规则命中风险时，混合分类器不再调用 LLM）：
+
+1. **分层词表**：`URGENT` 覆盖急症与自伤信号（胸痛、呼吸困难、喘不上气、窒息、昏迷、心脏骤停、心梗、中风、脑出血、大出血、中毒、休克、自杀、自伤、急救等）；`MEDICAL_REVIEW` 覆盖慢性病、用药与诊疗信号（糖尿病、高血压、低血糖、心脏病、心慌、心悸、癌症、肿瘤、抑郁、处方药、减肥药、药量、停药、胰岛素、诊断、确诊、治疗、手术、水肿、便血、尿血、咳血、高烧等）。
+2. **否定感知匹配**：风险词前 4 个字符内出现“不/没/无/未”视为否定表达，不触发风险（如“我没有胸痛”“不是高血压”“无用药史”）。否定仅按最近邻窗口判断，跨句否定需要医学审核后人工补词。
+3. **部位+症状组合**：词表无法穷举的组合由确定性正则召回，覆盖胸口/心脏/头/脑/腹/胃/腿/腰等部位与痛/疼/闷/晕/麻/胀/酸/出血/发烧/不舒服等症状（正向与倒装语序），否定词位于组合中间或前方时同样跳过（如“胸口不疼”）。
+4. **严重程度升级**：关键部位（胸口/心脏/心口/头/脑）的组合症状若伴随程度词（剧烈、持续、严重、难以忍受、突然、不停、越来越、长期）升级为 `URGENT`；其他部位保持 `MEDICAL_REVIEW`。
+5. **失眠特例**：失眠、睡不着、入睡困难等词伴随程度词（严重/长期/持续/一直/整夜/彻夜）时进入 `MEDICAL_REVIEW`；普通睡眠咨询仍走建议路由（睡眠词已并入建议词表）。
+6. **孤立症状兜底**：无业务诉求信号（指标/查询/分析/测量）的孤立症状描述（发烧、乏力、恶心、腹泻、麻木等）进入 `MEDICAL_REVIEW`；“心疼/心痛”作为情绪表达先剔除，“好心疼”不会误触发。
+7. **阻断状态**：安全回复节点返回 `status=blocked`，SSE 以 `done(status=blocked)` 结束，客户端可据此区别于正常完成的轮次做特殊展示。
+
+已知取舍：规则护栏偏向召回（宁多勿漏），隐喻表达（如“这个 bug 让人头疼”）与程度否定（如“不是很疼”）可能造成误召回或漏召回；后者由 LLM 主分类器兜底。疾病词优先于范围外判断（“我有高血压，帮我写诗”走医疗风险分支而非范围外回复）。
 
 ## 13. 错误模型
 
@@ -950,16 +1518,17 @@ src/weight_agent/
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 0 | 服务骨架、Python 3.11、基础测试 | 已完成 |
-| 1 | Chat 需求边界、接口和图设计 | 进行中 |
+| 1 | Chat 需求边界、接口和图设计 | 一期基线已完成，随实现持续更新 |
 | 2 | Chat schema、SSE 基础设施、可替换工作流、内存数据适配器 | 已完成（占位实现） |
 | 3 | 意图识别、时间归一化和路由 | 已完成规则优先的混合意图识别，并已接入 ChatWorkflow；真实 LLM Client、时间归一化与 Supervisor 待开发 |
 | 3a | Chat Supervisor 职责、输入输出契约和确定性护栏 | 已实现确定性 SupervisorPlan 生成、模型护栏和 Workflow 接入 |
 | 3c | Chat 节点协议与一期节点实现 | 已完成统一 NodeContext/NodeResult 协议、模板回复节点和业务占位节点 |
 | 3b | 短期会话记忆与多轮对话 | 已完成内存版契约和测试，Redis 适配待后续实现 |
-| 4 | 指标 Repository、查询与分析服务 | 未开始 |
-| 5 | 规则引擎与建议生成 | 未开始 |
+| 4 | 指标 Repository、查询与分析服务 | 已完成 Repository 注入、MetricQuery 执行和 MetricAnalysisService；数据库适配器待表结构确定后实现 |
+| 5 | 健康建议 Agent、规则引擎与建议生成 | 已完成规则版 `domain_advice` 和结构化 LLM 适配协议；具体模型服务与数据型建议等待后续 |
 | 6 | 可选联网健康检索、引用与安全策略 | 后续评估，不属于一期 |
-| 7 | 会话持久化、可观测性和端到端测试 | 未开始 |
+| 7 | 会话持久化、可观测性和端到端测试 | 已完成内存会话接入和 Chat 主链路测试；Redis 与更完整可观测性待后续 |
+| 意图识别深度设计-阶段一 | 新增内部 Task/Topic/Goal/DataDependency、SlotValue、IntentCandidate、SemanticParse 和 DialogueState 模型，保留 `IntentResult` 兼容 | 已完成；尚未接入分类器和会话记忆 |
 
 ## 18. 开发前待确认事项
 
@@ -1000,3 +1569,24 @@ src/weight_agent/
 | 2026-09-22 | v1.10 | 统一服务、Chat、Report 和模型服务配置分组，新增 Chat 意图阈值与会话参数的 `.env` 配置 | 待确认 |
 | 2026-09-22 | v1.11 | 稳定时间表达解析：支持滚动周期、自然周期、明确日期区间及最近 N 条记录，并区分 `latest_count` 与日期范围 | 待确认 |
 | 2026-09-22 | v1.12 | 完成请求时区到 NodeContext、MetricQuery 和 route_execution 的传递，补齐默认时区和最近 N 条查询计划输出 | 待确认 |
+| 2026-09-22 | v1.13 | 完成 MetricAnalysisService、Repository 查询接入、分析事实传递和 ChatWorkflow 短期会话记忆接入 | 待确认 |
+| 2026-09-22 | v1.14 | 将指标分析扩展为通用统计内核 + MetricAnalysisRegistry 策略注册，支持几十个指标渐进式接入 | 待确认 |
+| 2026-09-22 | v1.15 | 建立 MetricCatalog，首批登记 7 个指标并补充指标目录、策略覆盖和全量测试记录 | 待确认 |
+| 2026-09-22 | v1.16 | 明确数据库未就绪阶段先实现领域型健康建议 Agent，数据型建议保留契约并在缺少分析事实时安全降级 | 待确认 |
+| 2026-09-22 | v1.17 | 实现 `HealthAdviceAgent` 协议、规则版健康建议、`domain_advice` 路由接入和 `needs_data` 安全降级 | 待确认 |
+| 2026-09-22 | v1.18 | 增加结构化 LLM 健康建议适配协议，模型调用失败时自动回退规则版建议 | 待确认 |
+| 2026-09-22 | v1.19 | 增加规则优先编排器和受约束的 LLM 润色器，禁止模型修改建议事实和安全字段 | 待确认 |
+| 2026-09-22 | v1.20 | 将默认 SSE 调整为文本片段流，仅在调试配置开启时发送意图、路由和节点执行事件 | 待确认 |
+| 2026-09-22 | v1.21 | 将 `delta` 改为逐文本片段输出，默认 SSE 只保留 `start`、`delta` 和 `done` | 待确认 |
+| 2026-09-22 | v1.22 | 精简公共 SSE 负载：移除请求 ID、序号、时间戳及内部字段；调试模式保留完整元数据 | 待确认 |
+| 2026-09-22 | v1.23 | 将规则版 SSE 从逐字符改为按短句/适中长度分片，增加可配置分片大小 | 待确认 |
+| 2026-09-22 | v1.24 | 接入 DashScope 结构化模型客户端：规则优先的 LLM 意图识别与健康建议安全润色，分别配置模型、超时和输出参数 | 待确认 |
+| 2026-09-22 | v1.25 | 调整健康建议架构：通用建议由 LLM 优先生成，规则仅作为安全兜底；修正“体重下降，应该怎么增重”被误路由到数据分析的问题 | 待确认 |
+| 2026-09-23 | v1.26 | 修复澄清回路死循环：澄清轮次写入短期记忆并保存待定槽位 `pending_entities`，规则分类器支持澄清回答槽位合并与裸指标词查询，时间正则支持“最近三个月” | 待确认 |
+| 2026-09-23 | v1.27 | 修复多轮实体不合并与被覆盖：规则分类器在查询/分析/数据型建议分支合并 `confirmed_entities`；记忆层仅数据类意图携带显式指标时更新确认实体，问候、建议等轮次不再清空上下文 | 待确认 |
+| 2026-09-23 | v1.28 | 修复流中途异常断流：工作流异常边界统一转换为终止性 `error` 事件，公共模式放行并只暴露 `code/message/retryable`；时区在 Schema 层校验（复用 tzdata 兜底逻辑），`X-User-Id` 限制长度，日期区间倒置改为澄清 | 待确认 |
+| 2026-09-23 | v1.29 | 完善安全召回：急症/医疗词表分层扩充，否定感知匹配，部位+症状组合与关键部位严重程度升级，失眠特例与孤立症状兜底，安全回复以 `done(status=blocked)` 结束 | 待确认 |
+| 2026-09-23 | v1.30 | 新增意图识别深度设计：引入内部语义层、任务/主题/目标/数据依赖、槽位元信息、DST、多候选融合、澄清回路、OOS、鲁棒性、评估集和分阶段实施计划 | 待确认 |
+| 2026-09-23 | v1.31 | 明确模型使用边界：项目不训练、不微调、不部署本地模型，意图识别、健康建议和报告生成等模型能力统一通过外部模型 API 调用 | 待确认 |
+| 2026-09-23 | v1.32 | 在 `chat/models.py` 新增内部语义枚举、槽位元信息、候选意图、`SemanticParse` 和 `DialogueState`；保留现有 `IntentResult` 与路由契约，补充模型校验测试 | 待确认 |
+| 2026-09-23 | v1.33 | 明确多语言策略：区分客户端 `locale`、本轮 `detected_language` 和 `response_language`；按本轮语言直接生成答复，不增加独立翻译 API；定义保留原文的多语言文本归一化边界 | 待确认 |

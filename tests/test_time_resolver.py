@@ -79,6 +79,17 @@ def test_unknown_expression_returns_clarification() -> None:
     assert result.clarification_question is not None
 
 
+def test_reversed_explicit_range_returns_clarification() -> None:
+    result = TimeRangeResolver().resolve(
+        "2026年9月30日到2026年9月1日", timezone="UTC", now=NOW
+    )
+
+    assert result.needs_clarification is True
+    assert result.current is None
+    assert result.reason_codes == ["explicit_range_start_not_before_end"]
+    assert result.clarification_question is not None
+
+
 def test_missing_expression_uses_default_recent_period() -> None:
     result = TimeRangeResolver().resolve(None, timezone="UTC", now=NOW)
 

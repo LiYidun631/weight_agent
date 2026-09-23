@@ -51,13 +51,15 @@ class RouteExecutor:
         metric_repository: MetricRepository | None = None,
     ) -> None:
         data_analysis_node = data_analysis or DataAnalysisNode(repository=metric_repository)
+        business_advice_node = business_advice or BusinessAdviceNode()
         self._nodes: dict[str, ChatNode] = {
             "greeting": greeting or GreetingReplyNode(),
             "clarification": clarification or ClarificationReplyNode(),
             "safety": safety or SafetyReplyNode(),
             "out_of_scope": scope or ScopeReplyNode(),
             "data_analysis": data_analysis_node,
-            "business_advice": business_advice or BusinessAdviceNode(),
+            "business_advice": business_advice_node,
+            "domain_advice": business_advice_node,
         }
 
     async def execute(
@@ -82,7 +84,13 @@ class RouteExecutor:
         context: NodeContext,
     ) -> RouteExecutionResult:
         analysis_result = await self._nodes["data_analysis"].execute(plan, context)
-        advice_result = await self._nodes["business_advice"].execute(plan, context)
+        if analysis_result.status != "completed":
+            return self._aggregate(plan.route, [analysis_result], context)
+        analysis_facts = analysis_result.data.get("analysis_results", [])
+        advice_context = context.model_copy(
+            update={"artifacts": {**context.artifacts, "analysis_results": analysis_facts}}
+        )
+        advice_result = await self._nodes["business_advice"].execute(plan, advice_context)
         return self._aggregate(plan.route, [analysis_result, advice_result], context)
 
     @staticmethod

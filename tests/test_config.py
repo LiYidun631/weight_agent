@@ -3,6 +3,7 @@ from weight_agent.core.config import Settings
 
 def test_chat_runtime_settings_are_configurable() -> None:
     settings = Settings(
+        _env_file=None,
         environment="test",
         chat_intent_min_confidence=0.7,
         chat_intent_fallback_confidence=0.82,
@@ -11,6 +12,7 @@ def test_chat_runtime_settings_are_configurable() -> None:
         chat_memory_max_turns=6,
         chat_default_timezone="UTC",
         chat_default_locale="en-US",
+        chat_expose_debug_events=True,
     )
 
     assert settings.chat_intent_min_confidence == 0.7
@@ -20,3 +22,8 @@ def test_chat_runtime_settings_are_configurable() -> None:
     assert settings.chat_memory_max_turns == 6
     assert settings.chat_default_timezone == "UTC"
     assert settings.chat_default_locale == "en-US"
+    assert settings.chat_expose_debug_events is True
+    assert settings.chat_stream_chunk_size == 12
+    assert settings.chat_intent_model == "qwen3.7-flash"
+    assert settings.chat_intent_model_temperature == 0
+    assert settings.chat_advice_model == "qwen3.7-flash"

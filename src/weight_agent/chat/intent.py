@@ -33,6 +33,8 @@ class ClassifierContext(BaseModel):
     conversation_summary: str | None = Field(default=None, max_length=2000)
     recent_turns: list[ConversationTurn] = Field(default_factory=list, max_length=10)
     confirmed_entities: QueryEntities | None = None
+    # 上一轮澄清未完成的槽位；非 None 表示上一轮以澄清结束，等待用户补充
+    pending_entities: QueryEntities | None = None
     last_intent: ChatIntent | None = None
     last_analysis: AnalysisResult | None = None
     available_metrics: set[MetricType] = Field(default_factory=set, max_length=8)
@@ -81,6 +83,8 @@ class LlmIntentClassifier:
     _system_prompt = """你是体重管理 Chat 的意图识别器。
 只输出符合 response_schema 的 JSON，不要输出 Markdown、解释、SQL、工具调用或最终答复。
 请区分：问候或能力介绍、查询个人指标、分析趋势或对比、根据个人数据给建议、通用体重管理建议和非业务问题。
+如果用户使用“应该怎么、怎么办、如何、想要增重/减重”等行动表达，即使句子中出现“体重下降、
+体重上升”等趋势词，核心意图也优先判定为建议，不要判定为单纯指标分析或查询。
 如果涉及急症或明显需要医疗介入的内容，设置对应 risk_level。
 entities 只抽取用户原话中的槽位，不要把时间表达转换成日期。
 """
@@ -180,7 +184,7 @@ class HybridIntentClassifier:
             )
 
         if primary_result.risk_level in {RiskLevel.URGENT, RiskLevel.MEDICAL_REVIEW}:
-            return primary_result
+            return self._with_reason(primary_result, "risk_guard_override")
         if primary_result.confidence >= self._min_confidence:
             return primary_result
 
@@ -192,7 +196,13 @@ class HybridIntentClassifier:
         return (
             not result.needs_clarification
             and result.confidence >= self._rule_confidence
-            and result.intent is not ChatIntent.DOMAIN_ADVICE
+            and (
+                result.intent is not ChatIntent.DOMAIN_ADVICE
+                or any(
+                    reason in result.reason_codes
+                    for reason in ("direct_diet_question", "action_advice_request")
+                )
+            )
         )
 
     @staticmethod
@@ -238,7 +248,7 @@ class RuleBasedIntentClassifier:
     _measurement_data_terms = ("测量数据", "测量记录", "指标数据", "身体数据")
     _time_pattern = re.compile(
         r"(最近(?:一个|十四|三十|两|一|二|三|七|1|2|3|7|14|30|\d+)?"
-        r"(?:天|周|星期|月)"
+        r"(?:个)?(?:天|周|星期|月)"
         r"|本周|上周|本月|上个月|今天|昨天|今年|去年"
         r"|从\d{1,4}年?\d{1,2}月?\d{0,2}日?到\d{1,4}年?\d{1,2}月?\d{0,2}日?)"
     )
@@ -256,14 +266,30 @@ class RuleBasedIntentClassifier:
         "最新",
     )
     _analysis_terms = ("分析", "趋势", "变化", "对比", "比较", "情况", "下降", "上升")
+    _action_advice_terms = (
+        "应该怎么",
+        "应该如何",
+        "怎么办",
+        "如何",
+        "怎么调整",
+        "如何调整",
+        "增重",
+        "增加体重",
+        "减重",
+        "减少体重",
+    )
     _advice_terms = (
         "建议",
+        "吃什么",
         "怎么吃",
         "饮食",
         "早餐",
         "运动",
         "锻炼",
         "睡眠",
+        "失眠",
+        "睡不着",
+        "睡不好",
         "减脂",
         "减肥",
         "热量",
@@ -305,10 +331,28 @@ class RuleBasedIntentClassifier:
     _urgent_terms = (
         "胸痛",
         "呼吸困难",
+        "喘不上气",
+        "喘不过气",
+        "上不来气",
+        "无法呼吸",
+        "窒息",
         "意识不清",
+        "昏迷",
         "昏厥",
+        "晕倒",
+        "心脏骤停",
+        "心梗",
+        "心肌梗死",
+        "中风",
+        "脑梗",
+        "脑出血",
         "大出血",
         "严重过敏",
+        "溺水",
+        "触电",
+        "中毒",
+        "休克",
+        "快不行了",
         "自杀",
         "自伤",
         "急救",
@@ -316,12 +360,67 @@ class RuleBasedIntentClassifier:
     _medical_review_terms = (
         "糖尿病",
         "高血压",
+        "低血糖",
         "心脏病",
+        "心慌",
+        "心悸",
+        "心律不齐",
         "癌症",
+        "肿瘤",
+        "抑郁",
+        "焦虑症",
         "处方药",
+        "减肥药",
         "药量",
         "用药",
+        "停药",
+        "胰岛素",
         "诊断",
+        "确诊",
+        "治疗",
+        "手术",
+        "水肿",
+        "浮肿",
+        "便血",
+        "尿血",
+        "咳血",
+        "咯血",
+        "高烧",
+    )
+    _insomnia_terms = ("失眠", "睡不着", "入睡困难", "睡眠障碍", "睡不好", "彻夜未眠")
+    _insomnia_severity_terms = ("严重", "长期", "持续", "一直", "整夜", "彻夜")
+    _severity_terms = ("剧烈", "持续", "严重", "难以忍受", "突然", "不停", "越来越", "长期")
+    _critical_parts = frozenset({"胸口", "心脏", "心口", "胸", "头", "脑"})
+    _generic_symptom_terms = (
+        "拉肚子",
+        "发烧",
+        "发热",
+        "乏力",
+        "没力气",
+        "麻木",
+        "恶心",
+        "呕吐",
+        "腹泻",
+        "抽搐",
+        "晕",
+        "痛",
+        "疼",
+        "难受",
+        "不舒服",
+    )
+    _body_parts = (
+        "胸口|心脏|心口|浑身|全身|皮肤|胸|脑|头|腹|肚子|胃|肝|肾|关节|膝盖|腿|手臂|手|脚|腰|颈|肩|背"
+    )
+    _symptoms = "痛|疼|闷|晕|麻|胀|酸|痒|抽搐|出血|发烧|发热|肿|不舒服|没力气|不适|难受"
+    _part_symptom_pattern = re.compile(
+        rf"(?P<part>{_body_parts})"
+        rf"(?P<gap>[^，。！？!?\s不没无未]{{0,4}})"
+        rf"(?P<symptom>{_symptoms})"
+    )
+    _symptom_part_pattern = re.compile(
+        rf"(?P<symptom>{_symptoms})"
+        rf"(?P<gap>[^，。！？!?\s不没无未]{{0,4}})"
+        rf"(?P<part>{_body_parts})"
     )
 
     async def classify(self, message: str, context: ClassifierContext) -> IntentResult:
@@ -331,7 +430,7 @@ class RuleBasedIntentClassifier:
             raise ValueError("message must not be blank")
 
         lowered = text.lower()
-        urgent_hits = self._find_terms(lowered, self._urgent_terms)
+        urgent_hits = self._find_terms_negation_aware(lowered, self._urgent_terms)
         if urgent_hits:
             return IntentResult(
                 domain=ChatDomain.HEALTH_KNOWLEDGE,
@@ -342,11 +441,58 @@ class RuleBasedIntentClassifier:
                 reason_codes=["contains_urgent_term", *urgent_hits],
             )
 
+        combo_hits = self._find_body_symptom_combos(lowered)
+        if combo_hits:
+            critical = any(part in self._critical_parts for part, _ in combo_hits)
+            escalated = critical and self._contains_any(lowered, self._severity_terms)
+            descriptors = list(dict.fromkeys(f"{part}+{symptom}" for part, symptom in combo_hits))
+            return IntentResult(
+                domain=ChatDomain.HEALTH_KNOWLEDGE,
+                intent=ChatIntent.DOMAIN_ADVICE,
+                output_needs=[OutputNeed.ADVICE],
+                confidence=0.99 if escalated else 0.9,
+                risk_level=RiskLevel.URGENT if escalated else RiskLevel.MEDICAL_REVIEW,
+                reason_codes=[
+                    "critical_symptom_escalation" if escalated else "body_symptom_combo",
+                    *descriptors,
+                ],
+            )
+
+        medical_hits = self._find_terms_negation_aware(lowered, self._medical_review_terms)
+        if medical_hits:
+            return IntentResult(
+                domain=ChatDomain.HEALTH_KNOWLEDGE,
+                intent=ChatIntent.DOMAIN_ADVICE,
+                output_needs=[OutputNeed.ADVICE],
+                confidence=0.9,
+                risk_level=RiskLevel.MEDICAL_REVIEW,
+                reason_codes=["contains_medical_review_term", *medical_hits],
+            )
+
+        insomnia_hits = self._find_terms_negation_aware(lowered, self._insomnia_terms)
+        if insomnia_hits and self._contains_any(lowered, self._insomnia_severity_terms):
+            return IntentResult(
+                domain=ChatDomain.HEALTH_KNOWLEDGE,
+                intent=ChatIntent.DOMAIN_ADVICE,
+                output_needs=[OutputNeed.ADVICE],
+                confidence=0.85,
+                risk_level=RiskLevel.MEDICAL_REVIEW,
+                reason_codes=["insomnia_requires_review", *insomnia_hits],
+            )
+
         metric_types = self._find_metrics(lowered)
         time_expression = self._time_pattern.search(text)
         has_query = self._contains_any(lowered, self._query_terms)
         has_analysis = self._contains_any(lowered, self._analysis_terms)
         has_advice = self._contains_any(lowered, self._advice_terms)
+        has_action_advice = self._contains_any(lowered, self._action_advice_terms) and (
+            bool(metric_types)
+            or self._contains_any(lowered, ("增重", "增加体重", "减重", "减少体重"))
+        )
+        direct_diet_question = self._contains_any(
+            lowered,
+            ("吃什么", "怎么吃", "早餐吃", "午餐吃", "晚餐吃"),
+        )
         has_measurement_data = self._contains_any(lowered, self._measurement_data_terms)
         has_health_signal = bool(
             metric_types or time_expression or has_query or has_analysis or has_measurement_data
@@ -369,15 +515,22 @@ class RuleBasedIntentClassifier:
                 reason_codes=["contains_out_of_scope_term", *out_scope_hits],
             )
 
-        medical_hits = self._find_terms(lowered, self._medical_review_terms)
-        if medical_hits:
+        # 没有业务诉求信号时，孤立的症状描述按需就医提示兜底；
+        # “心疼/心痛”多为情绪表达，先剔除避免误召回。
+        symptom_text = lowered.replace("心疼", "").replace("心痛", "")
+        generic_symptom_hits = self._find_terms_negation_aware(
+            symptom_text, self._generic_symptom_terms
+        )
+        if generic_symptom_hits and not (
+            metric_types or has_query or has_analysis or has_measurement_data or data_based
+        ):
             return IntentResult(
                 domain=ChatDomain.HEALTH_KNOWLEDGE,
                 intent=ChatIntent.DOMAIN_ADVICE,
                 output_needs=[OutputNeed.ADVICE],
-                confidence=0.9,
+                confidence=0.85,
                 risk_level=RiskLevel.MEDICAL_REVIEW,
-                reason_codes=["contains_medical_review_term", *medical_hits],
+                reason_codes=["unrecognized_health_symptom", *generic_symptom_hits],
             )
 
         if (has_greeting or has_capability_question) and not (
@@ -390,8 +543,70 @@ class RuleBasedIntentClassifier:
                 reason_codes=["contains_greeting_or_capability_term"],
             )
 
-        if data_based and has_advice:
-            entities = self._entities(metric_types, time_expression, include_advice=True)
+        # 澄清回答：上一轮以澄清结束时，本轮短回答用于填充待定槽位。
+        # 消息本身没有查询/分析/建议等独立诉求信号时才按补充槽位理解，
+        # 显式的"查一下/分析/建议"表达仍然优先按新诉求路由。
+        pending = context.pending_entities
+        pending_intent = context.last_intent
+        has_own_signal = (
+            has_query
+            or has_analysis
+            or has_advice
+            or has_action_advice
+            or data_based
+            or has_greeting
+            or has_capability_question
+        )
+        if (
+            pending is not None
+            and pending_intent
+            in {ChatIntent.METRIC_QUERY, ChatIntent.METRIC_ANALYSIS, ChatIntent.DATA_BASED_ADVICE}
+            and not has_own_signal
+            and (metric_types or time_expression)
+        ):
+            merged = pending.model_copy(deep=True)
+            merged.metrics = metric_types or merged.metrics
+            merged.time_expression = (
+                time_expression.group(0) if time_expression else merged.time_expression
+            )
+            missing_metrics = not merged.metrics
+            output_needs = {
+                ChatIntent.METRIC_QUERY: [OutputNeed.DATA],
+                ChatIntent.METRIC_ANALYSIS: [OutputNeed.DATA, OutputNeed.COMPARISON],
+                ChatIntent.DATA_BASED_ADVICE: [OutputNeed.DATA, OutputNeed.ADVICE],
+            }[pending_intent]
+            return IntentResult(
+                domain=ChatDomain.HEALTH_DATA,
+                intent=pending_intent,
+                output_needs=output_needs,
+                entities=merged,
+                confidence=0.85 if not missing_metrics else 0.6,
+                needs_clarification=missing_metrics,
+                clarification_question=(
+                    "你想查询体重、BMI、体脂率还是腰围？" if missing_metrics else None
+                ),
+                reason_codes=[
+                    "clarification_slot_fill",
+                    *self._metric_reason_codes(merged.metrics),
+                ],
+            )
+
+        # 无上下文的裸指标词（如只回复"体重"）按查询最近一次数据理解；
+        # 有多轮上下文时沿用已确认的时间范围
+        if metric_types and not has_own_signal and not time_expression:
+            return IntentResult(
+                domain=ChatDomain.HEALTH_DATA,
+                intent=ChatIntent.METRIC_QUERY,
+                output_needs=[OutputNeed.DATA],
+                entities=self._merged_entities(metric_types, None, context),
+                confidence=0.84,
+                reason_codes=["bare_metric_query", *self._metric_reason_codes(metric_types)],
+            )
+
+        if data_based and (has_advice or has_action_advice):
+            entities = self._merged_entities(
+                metric_types, time_expression, context, include_advice=True
+            )
             return IntentResult(
                 domain=ChatDomain.HEALTH_DATA,
                 intent=ChatIntent.DATA_BASED_ADVICE,
@@ -401,9 +616,27 @@ class RuleBasedIntentClassifier:
                 reason_codes=["contains_data_based_advice_term"],
             )
 
+        # “体重一直下降，应该怎么增重”虽然包含趋势词和指标词，
+        # 用户诉求仍然是行动建议；不能误路由到数据分析占位节点。
+        if (direct_diet_question or has_action_advice) and not data_based:
+            entities = self._entities(metric_types, time_expression, include_advice=True)
+            return IntentResult(
+                domain=ChatDomain.HEALTH_KNOWLEDGE,
+                intent=ChatIntent.DOMAIN_ADVICE,
+                output_needs=[OutputNeed.ADVICE],
+                entities=entities,
+                confidence=0.92,
+                reason_codes=[
+                    "direct_diet_question" if direct_diet_question else "action_advice_request",
+                    *self._metric_reason_codes(metric_types),
+                ],
+            )
+
         if has_analysis and (metric_types or time_expression or context_has_data):
-            entities = self._entities(metric_types, time_expression, include_advice=has_advice)
-            needs_clarification = not metric_types and not context.confirmed_entities
+            entities = self._merged_entities(
+                metric_types, time_expression, context, include_advice=has_advice
+            )
+            needs_clarification = not entities.metrics
             return IntentResult(
                 domain=ChatDomain.HEALTH_DATA,
                 intent=ChatIntent.METRIC_ANALYSIS,
@@ -424,8 +657,8 @@ class RuleBasedIntentClassifier:
         if has_query and (
             metric_types or context_has_data or time_expression or has_measurement_data
         ):
-            entities = self._entities(metric_types, time_expression)
-            needs_clarification = not metric_types and not context.confirmed_entities
+            entities = self._merged_entities(metric_types, time_expression, context)
+            needs_clarification = not entities.metrics
             return IntentResult(
                 domain=ChatDomain.HEALTH_DATA,
                 intent=ChatIntent.METRIC_QUERY,
@@ -439,17 +672,23 @@ class RuleBasedIntentClassifier:
                 reason_codes=["contains_query_term", *self._metric_reason_codes(metric_types)],
             )
 
-        if has_advice or (context_has_data and not out_scope_hits):
+        if has_advice or has_action_advice or (context_has_data and not out_scope_hits):
             return IntentResult(
                 domain=ChatDomain.HEALTH_KNOWLEDGE,
                 intent=ChatIntent.DOMAIN_ADVICE,
                 output_needs=[OutputNeed.ADVICE],
-                confidence=0.8 if has_advice else 0.58,
+                # 明确的饮食问题是一期规则可确定处理的简单建议场景；
+                # 复杂的“平台期怎么办”等问题仍保留给 LLM。
+                confidence=0.9 if direct_diet_question else (0.8 if has_advice else 0.58),
                 needs_clarification=not has_advice,
                 clarification_question=None
                 if has_advice
                 else "你想咨询饮食、运动、睡眠还是体重管理？",
-                reason_codes=["contains_advice_term"]
+                reason_codes=(
+                    ["direct_diet_question", "contains_advice_term"]
+                    if direct_diet_question
+                    else ["contains_advice_term"]
+                )
                 if has_advice
                 else ["ambiguous_health_request"],
             )
@@ -476,12 +715,68 @@ class RuleBasedIntentClassifier:
             advice_categories=[AdviceCategory.DIET] if include_advice else [],
         )
 
+    @staticmethod
+    def _merged_entities(
+        metrics: list[MetricType],
+        time_expression: re.Match[str] | None,
+        context: ClassifierContext,
+        *,
+        include_advice: bool = False,
+    ) -> QueryEntities:
+        """合并本轮消息槽位与已确认实体：消息未显式给出的槽位沿用上下文。"""
+        confirmed = context.confirmed_entities
+        merged_metrics = metrics or (confirmed.metrics if confirmed else [])
+        merged_time = (time_expression.group(0) if time_expression else None) or (
+            confirmed.time_expression if confirmed else None
+        )
+        categories: list[AdviceCategory] = []
+        if include_advice:
+            categories.append(AdviceCategory.DIET)
+        if confirmed and confirmed.advice_categories:
+            categories = list(dict.fromkeys([*confirmed.advice_categories, *categories]))
+        return QueryEntities(
+            metrics=merged_metrics,
+            time_expression=merged_time,
+            advice_categories=categories,
+        )
+
     def _find_metrics(self, text: str) -> list[MetricType]:
         return [
             metric
             for metric, terms in self._metric_terms.items()
             if any(term in text for term in terms)
         ]
+
+    @classmethod
+    def _find_terms_negation_aware(cls, text: str, terms: tuple[str, ...]) -> list[str]:
+        """查找未被否定的风险词；存在任一未否定出现即视为命中。"""
+        hits = []
+        for term in terms:
+            start = 0
+            while True:
+                index = text.find(term, start)
+                if index == -1:
+                    break
+                if not cls._is_negated(text, index):
+                    hits.append(term)
+                    break
+                start = index + 1
+        return hits
+
+    @staticmethod
+    def _is_negated(text: str, index: int) -> bool:
+        window = text[max(0, index - 4) : index]
+        return any(char in window for char in ("不", "没", "无", "未"))
+
+    @classmethod
+    def _find_body_symptom_combos(cls, text: str) -> list[tuple[str, str]]:
+        combos: list[tuple[str, str]] = []
+        for pattern in (cls._part_symptom_pattern, cls._symptom_part_pattern):
+            for match in pattern.finditer(text):
+                if cls._is_negated(text, match.start()):
+                    continue
+                combos.append((match.group("part"), match.group("symptom")))
+        return combos
 
     @staticmethod
     def _find_terms(text: str, terms: tuple[str, ...]) -> list[str]:

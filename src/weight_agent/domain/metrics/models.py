@@ -14,6 +14,9 @@ class MetricType(StrEnum):
     BMI = "bmi"  # 身体质量指数
     BODY_FAT_RATE = "body_fat_rate"  # 体脂率
     WAIST_CIRCUMFERENCE = "waist_circumference"  # 腰围
+    BASAL_METABOLIC_RATE = "basal_metabolic_rate"  # 基础代谢
+    MUSCLE_MASS = "muscle_mass"  # 肌肉量
+    BODY_WATER_RATE = "body_water_rate"  # 体水分率
 
 
 class MetricObservation(BaseModel):

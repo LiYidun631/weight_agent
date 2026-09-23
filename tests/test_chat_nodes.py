@@ -93,10 +93,11 @@ def test_safety_and_scope_reply_nodes_return_templates() -> None:
     scope_result = asyncio.run(ScopeReplyNode().execute(scope_plan, CONTEXT))
 
     assert "就医" in safety_result.content
+    assert safety_result.status == "blocked"
     assert "超出了" in scope_result.content
 
 
-def test_business_nodes_return_placeholder_metadata() -> None:
+def test_business_advice_node_returns_structured_domain_advice() -> None:
     data_plan = make_plan(
         IntentResult(
             domain=ChatDomain.HEALTH_DATA,
@@ -118,9 +119,12 @@ def test_business_nodes_return_placeholder_metadata() -> None:
     analysis_result = asyncio.run(DataAnalysisNode().execute(data_plan, CONTEXT))
     advice_result = asyncio.run(BusinessAdviceNode().execute(advice_plan, CONTEXT))
 
-    assert analysis_result.data["execution_status"] == "not_implemented"
+    assert analysis_result.data["execution_status"] == "query_plan_only"
     assert analysis_result.data["requires_metric_query"] is True
     assert advice_result.data["requires_analysis"] is False
+    assert advice_result.data["execution_status"] == "completed"
+    assert advice_result.data["advice"]["recommendations"]
+    assert "稳定饮食结构" in advice_result.content
 
 
 def test_data_analysis_node_builds_metric_query_from_time_expression() -> None:

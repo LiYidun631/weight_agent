@@ -14,8 +14,19 @@ from fastapi.responses import JSONResponse
 
 from weight_agent import __version__
 from weight_agent.api.router import api_router
-from weight_agent.chat.intent import HybridIntentClassifier, RuleBasedIntentClassifier
+from weight_agent.chat.advice import (
+    LlmHealthAdviceAgent,
+    RuleBasedHealthAdviceAgent,
+)
+from weight_agent.chat.executor import RouteExecutor
+from weight_agent.chat.intent import (
+    HybridIntentClassifier,
+    LlmIntentClassifier,
+    RuleBasedIntentClassifier,
+)
+from weight_agent.chat.llm import DashScopeStructuredOutputClient
 from weight_agent.chat.memory import InMemoryConversationMemory
+from weight_agent.chat.node import BusinessAdviceNode
 from weight_agent.chat.workflow import ChatWorkflow
 from weight_agent.core.config import Settings, get_settings
 from weight_agent.report.qwen import QwenReportAnalyzer
@@ -57,10 +68,14 @@ def create_app(
     async def validation_error_response(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        # 非有限数只在错误详情中转为文本，避免非法输入使 422 序列化成 500。
+        # 错误详情也含原始输入；递归处理键和值，避免非法编码或非有限数将 422 变成 500。
         errors = jsonable_encoder(
             exc.errors(),
-            custom_encoder={float: lambda value: value if math.isfinite(value) else str(value)},
+            custom_encoder={
+                float: lambda value: value if math.isfinite(value) else str(value),
+                str: lambda value: value.encode("utf-8", errors="backslashreplace").decode("utf-8"),
+                bytes: lambda value: value.decode("utf-8", errors="backslashreplace"),
+            },
         )
         return JSONResponse(status_code=422, content={"detail": errors})
 
@@ -89,18 +104,68 @@ def create_app(
     # 将配置与工作流挂到应用状态上，供路由处理器使用
     app.state.settings = resolved_settings
     rule_classifier = RuleBasedIntentClassifier()
-    app.state.chat_workflow = ChatWorkflow(
-        intent_classifier=HybridIntentClassifier(
-            primary=rule_classifier,
+    intent_classifier = rule_classifier
+    health_advice_agent = None
+    if (
+        resolved_settings.chat_llm_enabled
+        and resolved_settings.environment != "test"
+        and resolved_settings.dashscope_api_key is not None
+    ):
+        api_key = resolved_settings.dashscope_api_key.get_secret_value()
+        intent_client = DashScopeStructuredOutputClient(
+            api_key=api_key,
+            base_url=resolved_settings.chat_intent_model_base_url,
+            model=resolved_settings.chat_intent_model,
+            timeout_seconds=resolved_settings.chat_intent_model_timeout_seconds,
+            temperature=resolved_settings.chat_intent_model_temperature,
+            max_completion_tokens=resolved_settings.chat_intent_model_max_completion_tokens,
+            enable_thinking=resolved_settings.chat_intent_model_enable_thinking,
+        )
+        intent_classifier = HybridIntentClassifier(
+            primary=LlmIntentClassifier(intent_client),
             fallback=rule_classifier,
             min_confidence=resolved_settings.chat_intent_min_confidence,
             fallback_confidence=resolved_settings.chat_intent_fallback_confidence,
             rule_confidence=resolved_settings.chat_intent_rule_confidence,
         )
-    )
-    app.state.chat_memory = InMemoryConversationMemory(
+        advice_client = DashScopeStructuredOutputClient(
+            api_key=api_key,
+            base_url=resolved_settings.chat_advice_model_base_url,
+            model=resolved_settings.chat_advice_model,
+            timeout_seconds=resolved_settings.chat_advice_model_timeout_seconds,
+            temperature=resolved_settings.chat_advice_model_temperature,
+            max_completion_tokens=resolved_settings.chat_advice_model_max_completion_tokens,
+            enable_thinking=resolved_settings.chat_advice_model_enable_thinking,
+        )
+        health_advice_agent = LlmHealthAdviceAgent(
+            client=advice_client,
+            fallback=RuleBasedHealthAdviceAgent(),
+        )
+    chat_memory = InMemoryConversationMemory(
         ttl=timedelta(hours=resolved_settings.chat_memory_ttl_hours),
         max_turns=resolved_settings.chat_memory_max_turns,
+    )
+    app.state.chat_memory = chat_memory
+    app.state.chat_workflow = ChatWorkflow(
+        intent_classifier=intent_classifier
+        if isinstance(intent_classifier, HybridIntentClassifier)
+        else HybridIntentClassifier(
+            primary=rule_classifier,
+            fallback=rule_classifier,
+            min_confidence=resolved_settings.chat_intent_min_confidence,
+            fallback_confidence=resolved_settings.chat_intent_fallback_confidence,
+            rule_confidence=resolved_settings.chat_intent_rule_confidence,
+        ),
+        route_executor=RouteExecutor(
+            business_advice=(
+                BusinessAdviceNode(agent=health_advice_agent)
+                if health_advice_agent is not None
+                else None
+            )
+        ),
+        memory=chat_memory,
+        expose_debug_events=resolved_settings.chat_expose_debug_events,
+        stream_chunk_size=resolved_settings.chat_stream_chunk_size,
     )
     resolved_report_analyzer = report_analyzer or _build_report_analyzer(resolved_settings)
     app.state.report_workflow = ReportWorkflow(
@@ -124,6 +189,7 @@ def _build_report_analyzer(settings: Settings) -> ReportAnalyzer:
         temperature=settings.report_model_temperature,
         max_completion_tokens=settings.report_model_max_completion_tokens,
         enable_thinking=settings.report_model_enable_thinking,
+        strict_output_validation=settings.report_model_strict_output_validation,
     )
 
 

@@ -34,6 +34,66 @@ class ChatIntent(StrEnum):
     OUT_OF_SCOPE = "out_of_scope"
 
 
+class TaskType(StrEnum):
+    """内部语义层的任务类型。
+
+    Task 表示用户想完成的动作，不等同于最终路由。它用于解决“提到指标”
+    与“想要建议/查询/分析”之间的语义冲突。
+    """
+
+    GREETING = "greeting"
+    QUERY = "query"
+    ANALYSIS = "analysis"
+    ADVICE = "advice"
+    COMPARE = "compare"
+    EXPLAIN = "explain"
+    CLARIFY = "clarify"
+    OUT_OF_SCOPE = "out_of_scope"
+
+
+class TopicType(StrEnum):
+    """内部语义层的业务主题。"""
+
+    WEIGHT = "weight"
+    BMI = "bmi"
+    BODY_FAT = "body_fat"
+    WAIST = "waist"
+    DIET = "diet"
+    EXERCISE = "exercise"
+    SLEEP = "sleep"
+    LIFESTYLE = "lifestyle"
+    GENERAL_HEALTH = "general_health"
+
+
+class GoalType(StrEnum):
+    """用户健康管理目标。"""
+
+    WEIGHT_LOSS = "weight_loss"
+    WEIGHT_GAIN = "weight_gain"
+    FAT_LOSS = "fat_loss"
+    MUSCLE_GAIN = "muscle_gain"
+    MAINTAIN_WEIGHT = "maintain_weight"
+    IMPROVE_LIFESTYLE = "improve_lifestyle"
+
+
+class DataDependency(StrEnum):
+    """完成当前请求是否依赖个人指标数据。"""
+
+    NONE = "none"
+    OPTIONAL = "optional"
+    REQUIRED = "required"
+
+
+class SlotSource(StrEnum):
+    """槽位值来源。"""
+
+    USER = "user"
+    RULE = "rule"
+    LLM = "llm"
+    CONTEXT = "context"
+    DEFAULT = "default"
+
+
 class OutputNeed(StrEnum):
     """用户希望得到的输出类型。"""
 
@@ -79,6 +139,78 @@ class QueryEntities(BaseModel):
     goal: str | None = Field(default=None, max_length=256)
 
 
+class SlotValue(BaseModel):
+    """内部语义层的槽位值及其元信息。
+
+    与 QueryEntities 不同，SlotValue 会记录来源、置信度、确认状态和冲突状态，
+    用于多轮对话、候选融合和澄清决策。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=64)
+    value: str | list[str] | None = None
+    canonical_value: str | list[str] | None = None
+    source: SlotSource
+    confidence: float = Field(ge=0, le=1)
+    confirmed: bool = False
+    required: bool = False
+    conflict: bool = False
+
+
+class IntentCandidate(BaseModel):
+    """内部语义层的候选意图。
+
+    候选意图用于表达歧义和多意图排序，最终仍会适配成一个兼容的 IntentResult。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    task: TaskType
+    intent: ChatIntent
+    topics: list[TopicType] = Field(default_factory=list, max_length=8)
+    goals: list[GoalType] = Field(default_factory=list, max_length=4)
+    data_dependency: DataDependency = DataDependency.NONE
+    score: float = Field(ge=0, le=1)
+    evidence: list[str] = Field(default_factory=list, max_length=16)
+    missing_slots: list[str] = Field(default_factory=list, max_length=8)
+
+
+class SemanticParse(BaseModel):
+    """意图识别内部语义解析结果。
+
+    SemanticParse 是规则解析、LLM 解析和候选融合之间的中间表示，不直接作为
+    Chat API 输出。它会在最后适配为 IntentResult 供 Supervisor 使用。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    domain: ChatDomain
+    task: TaskType
+    topics: list[TopicType] = Field(default_factory=list, max_length=8)
+    goals: list[GoalType] = Field(default_factory=list, max_length=4)
+    data_dependency: DataDependency = DataDependency.NONE
+    slots: list[SlotValue] = Field(default_factory=list, max_length=32)
+    candidates: list[IntentCandidate] = Field(default_factory=list, max_length=8)
+    selected_candidate_index: int | None = Field(default=None, ge=0)
+    confidence: float = Field(ge=0, le=1)
+    risk_level: RiskLevel = RiskLevel.NONE
+    needs_clarification: bool = False
+    clarification_question: str | None = Field(default=None, max_length=256)
+    reason_codes: list[str] = Field(default_factory=list, max_length=16)
+
+    @model_validator(mode="after")
+    def validate_semantic_parse(self) -> "SemanticParse":
+        """校验澄清问题和候选选择下标。"""
+        if self.needs_clarification and not self.clarification_question:
+            raise ValueError("clarification_question is required when needs_clarification is true")
+        if self.selected_candidate_index is not None and (
+            self.selected_candidate_index >= len(self.candidates)
+        ):
+            raise ValueError("selected_candidate_index is out of candidates range")
+        return self
+
+
 class IntentResult(BaseModel):
     """意图识别器的结构化输出。"""
 
@@ -122,6 +254,10 @@ class AnalysisResult(BaseModel):
     baseline_period_start: datetime | None = None
     baseline_period_end: datetime | None = None
     data_coverage: float | None = Field(default=None, ge=0, le=1)
+    metadata: dict[str, str | int | float | bool | None] = Field(
+        default_factory=dict,
+        max_length=32,
+    )
 
 
 class AdviceFact(BaseModel):
@@ -165,6 +301,8 @@ class ConversationContext(BaseModel):
     summary: str | None = Field(default=None, max_length=2000)
     recent_turns: list[ConversationTurn] = Field(default_factory=list, max_length=20)
     confirmed_entities: QueryEntities | None = None
+    # 上一轮澄清未完成的槽位；非 None 表示存在待用户回答的澄清问题
+    pending_entities: QueryEntities | None = None
     last_intent: ChatIntent | None = None
     last_analysis: AnalysisResult | None = None
     expires_at: datetime
@@ -197,6 +335,26 @@ SupervisorRoute = Literal[
     "clarification",
 ]
 RequiredAgent = Literal["data_analysis", "business_advice"]
+
+
+class DialogueState(BaseModel):
+    """内部对话状态跟踪模型。
+
+    该模型用于后续 DST 设计，当前先作为内部结构沉淀，不替代现有
+    ConversationContext.confirmed_entities/pending_entities。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    active_task: TaskType | None = None
+    active_topics: list[TopicType] = Field(default_factory=list, max_length=8)
+    active_goal: GoalType | None = None
+    confirmed_slots: list[SlotValue] = Field(default_factory=list, max_length=32)
+    pending_slots: list[SlotValue] = Field(default_factory=list, max_length=16)
+    last_candidates: list[IntentCandidate] = Field(default_factory=list, max_length=8)
+    last_route: SupervisorRoute | None = None
+    clarification_attempts: int = Field(default=0, ge=0, le=5)
+    last_user_correction: bool = False
 
 
 class SupervisorPlan(BaseModel):

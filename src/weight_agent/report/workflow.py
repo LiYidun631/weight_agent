@@ -127,7 +127,8 @@ class ReportWorkflow:
         source_text = "模型生成" if generation_mode == "model" else "规则兜底"
         console_logger.info(
             "[REPORT_RESULT] source=%s model_called=%s model=%s "
-            "model_categories=%s fallback_categories=%s duration_ms=%.2f",
+            "model_categories=%s fallback_categories=%s fallback_reason=%s "
+            "model_duration_ms=%.2f duration_ms=%.2f",
             source_text,
             model_called,
             getattr(self._analyzer, "model_name", "unavailable"),
@@ -138,6 +139,8 @@ class ReportWorkflow:
             )
             or "none",
             ",".join(fallback_categories) or "none",
+            fallback_reason or "none",
+            model_duration_ms,
             total_duration_ms,
         )
         logger.info(

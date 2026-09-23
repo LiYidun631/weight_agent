@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from weight_agent.domain.time.resolver import load_timezone
+
 
 class ClientContext(BaseModel):
     """客户端上下文信息。"""
@@ -29,6 +31,18 @@ class ChatRequest(BaseModel):
             raise ValueError("message must not be blank")
         return value
 
+    @field_validator("timezone")
+    @classmethod
+    def timezone_must_be_valid(cls, value: str | None) -> str | None:
+        """校验时区为可识别的 IANA 时区，避免流建立后才解析失败。"""
+        if value is None:
+            return None
+        try:
+            load_timezone(value)
+        except ValueError as exc:
+            raise ValueError(f"unknown timezone: {value}") from exc
+        return value
+
 
 class ChatEvent(BaseModel):
     """流式 Chat 事件结构。"""
@@ -50,5 +64,6 @@ class ChatError(BaseModel):
 class ChatDone(BaseModel):
     """流式 Chat 完成事件。"""
 
-    status: Literal["completed", "needs_clarification"] = "completed"  # 完成状态
+    status: Literal["completed", "needs_clarification", "needs_data", "blocked"] = "completed"
+    # 完成状态
     conversation_id: str  # 会话 ID

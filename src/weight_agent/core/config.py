@@ -47,13 +47,38 @@ class Settings(BaseSettings):
     chat_default_timezone: str = "Asia/Shanghai"
     chat_default_locale: str = "zh-CN"
 
+    # Chat SSE 是否暴露意图、路由和节点执行等内部调试事件。
+    # 生产和普通客户端默认关闭；开发排查时可在 .env 中开启。
+    chat_expose_debug_events: bool = False
+    # 规则版 SSE 文本分片大小；接入原生流式模型后由模型 chunk 决定。
+    chat_stream_chunk_size: int = Field(default=12, ge=1, le=100)
+    # Chat 是否启用真实模型；规则分类和规则建议始终保留为兜底。
+    chat_llm_enabled: bool = True
+
+    # Chat 意图识别模型：规则无法明确判断时才调用。
+    chat_intent_model: str = "qwen3.7-flash"
+    chat_intent_model_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    chat_intent_model_timeout_seconds: float = Field(default=8.0, gt=0)
+    chat_intent_model_temperature: float = Field(default=0.0, ge=0, le=2)
+    chat_intent_model_max_completion_tokens: int = Field(default=512, gt=0)
+    chat_intent_model_enable_thinking: bool = False
+
+    # Chat 健康建议模型：只润色规则建议，不修改建议事实和安全字段。
+    chat_advice_model: str = "qwen3.7-flash"
+    chat_advice_model_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    chat_advice_model_timeout_seconds: float = Field(default=12.0, gt=0)
+    chat_advice_model_temperature: float = Field(default=0.2, ge=0, le=2)
+    chat_advice_model_max_completion_tokens: int = Field(default=800, gt=0)
+    chat_advice_model_enable_thinking: bool = False
+
     # ==================== Report 接口配置 ====================
     # 报告模型调用参数；密钥和地址不应写死在业务代码中。
-    report_model_timeout_seconds: float = Field(default=45.0, gt=0)  # 模型调用超时（秒）
+    report_model_timeout_seconds: float = Field(default=20.0, gt=0)  # 模型调用超时（秒）
     report_model: str = "qwen3.8-flash"  # 报告分析使用的模型名称
     report_model_temperature: float = Field(default=0.2, ge=0, le=2)
-    report_model_max_completion_tokens: int = Field(default=1200, gt=0)
+    report_model_max_completion_tokens: int = Field(default=800, gt=0)
     report_model_enable_thinking: bool = False
+    report_model_strict_output_validation: bool = False
 
     # ==================== 模型服务配置 ====================
     report_model_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
