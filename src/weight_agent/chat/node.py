@@ -37,6 +37,8 @@ class NodeContext(BaseModel):
     user_id: str = Field(min_length=1, max_length=128)
     message: str = Field(default="", max_length=4000)
     locale: str = Field(default="zh-CN", min_length=1, max_length=16)
+    detected_language: str = Field(default="zh", min_length=2, max_length=16)
+    response_language: str = Field(default="zh-CN", min_length=2, max_length=16)
     timezone: str = Field(default="Asia/Shanghai", min_length=1, max_length=64)
     conversation_summary: str | None = Field(default=None, max_length=2000)
     recent_turns: list[ConversationTurn] = Field(default_factory=list, max_length=10)

@@ -18,6 +18,7 @@ from weight_agent.chat.models import (
     QueryEntities,
     RiskLevel,
 )
+from weight_agent.chat.normalization import normalize_chat_text
 from weight_agent.domain.metrics.models import MetricType
 
 
@@ -38,6 +39,9 @@ class ClassifierContext(BaseModel):
     last_intent: ChatIntent | None = None
     last_analysis: AnalysisResult | None = None
     available_metrics: set[MetricType] = Field(default_factory=set, max_length=8)
+    client_locale: str = Field(default="zh-CN", min_length=2, max_length=16)
+    detected_language: str = Field(default="zh", min_length=2, max_length=16)
+    response_language: str = Field(default="zh-CN", min_length=2, max_length=16)
 
 
 @runtime_checkable
@@ -429,7 +433,7 @@ class RuleBasedIntentClassifier:
         if not text:
             raise ValueError("message must not be blank")
 
-        lowered = text.lower()
+        lowered = normalize_chat_text(text).matching_text
         urgent_hits = self._find_terms_negation_aware(lowered, self._urgent_terms)
         if urgent_hits:
             return IntentResult(
@@ -793,3 +797,5 @@ class RuleBasedIntentClassifier:
     @staticmethod
     def _metric_reason_codes(metrics: list[MetricType]) -> list[str]:
         return [f"contains_metric_{metric.value}" for metric in metrics]
+
+

@@ -20,6 +20,7 @@ from weight_agent.chat.intent import (
 from weight_agent.chat.memory import ConversationMemory
 from weight_agent.chat.models import ChatIntent, ConversationTurn
 from weight_agent.chat.node import NodeContext
+from weight_agent.chat.normalization import normalize_chat_text
 from weight_agent.chat.supervisor import ChatSupervisor
 from weight_agent.core.config import get_settings
 
@@ -130,6 +131,11 @@ class ChatWorkflow:
             if self._memory and request.conversation_id
             else None
         )
+        language = normalize_chat_text(
+            request.message,
+            client_locale=request.client_context.locale,
+            default_locale=get_settings().chat_default_locale,
+        )
         yield "start", {"conversation_id": conversation_id, "request_id": request_id}
         if self._expose_debug_events:
             yield "progress", {"stage": "understanding", "message": "正在理解你的问题"}
@@ -142,6 +148,9 @@ class ChatWorkflow:
                 pending_entities=conversation.pending_entities if conversation else None,
                 last_intent=conversation.last_intent if conversation else None,
                 last_analysis=conversation.last_analysis if conversation else None,
+                client_locale=request.client_context.locale,
+                detected_language=language.detected_language or language.response_language,
+                response_language=language.response_language,
             ),
         )
         if self._expose_debug_events:
@@ -169,6 +178,8 @@ class ChatWorkflow:
                 user_id=user_id,
                 message=request.message,
                 locale=request.client_context.locale,
+                detected_language=language.detected_language or language.response_language,
+                response_language=language.response_language,
                 timezone=request.timezone or self._default_timezone,
                 conversation_summary=conversation.summary if conversation else None,
                 recent_turns=conversation.recent_turns if conversation else [],
@@ -297,3 +308,4 @@ class ChatWorkflow:
 def event_timestamp() -> str:
     """返回当前 UTC 时间的 ISO 格式时间戳，用于 SSE 事件。"""
     return datetime.now(UTC).isoformat()
+

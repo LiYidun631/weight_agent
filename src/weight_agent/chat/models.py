@@ -198,6 +198,9 @@ class SemanticParse(BaseModel):
     needs_clarification: bool = False
     clarification_question: str | None = Field(default=None, max_length=256)
     reason_codes: list[str] = Field(default_factory=list, max_length=16)
+    detected_language: str = Field(default="zh", min_length=2, max_length=16)
+    response_language: str = Field(default="zh-CN", min_length=2, max_length=16)
+    language_confidence: float = Field(default=0.0, ge=0, le=1)
 
     @model_validator(mode="after")
     def validate_semantic_parse(self) -> "SemanticParse":

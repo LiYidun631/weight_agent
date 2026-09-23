@@ -10,7 +10,12 @@ from weight_agent.domain.time.resolver import load_timezone
 class ClientContext(BaseModel):
     """客户端上下文信息。"""
 
-    locale: str = Field(default="zh-CN", max_length=16)  # 客户端语言环境
+    locale: str = Field(
+        default="zh-CN",
+        min_length=2,
+        max_length=16,
+        pattern=r"^[A-Za-z]{2,8}(?:[-_][A-Za-z0-9]{2,8})*$",
+    )  # 客户端语言环境（BCP 47 简化格式）
 
 
 class ChatRequest(BaseModel):
@@ -67,3 +72,5 @@ class ChatDone(BaseModel):
     status: Literal["completed", "needs_clarification", "needs_data", "blocked"] = "completed"
     # 完成状态
     conversation_id: str  # 会话 ID
+
+
